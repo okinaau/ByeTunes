@@ -28,11 +28,13 @@ struct SettingsView: View {
     @State private var snapshots: [DeviceManager.DatabaseSnapshotInfo] = []
     @State private var isCheckingForUpdate = false
     @State private var settingsUpdate: AppUpdateInfo?
+    @State private var supporters: [String] = []
+    @State private var supportersLoaded = false
     
     @State private var showToast = false
     @State private var toastTitle = ""
     @State private var toastIcon = ""
-    
+
     @AppStorage("metadataSource") private var metadataSource = "local"
     @AppStorage("autofetchMetadata") private var autofetchMetadata = true
     @AppStorage("fetchLyrics") private var fetchLyrics = false
@@ -41,7 +43,7 @@ struct SettingsView: View {
     @AppStorage("appleRichMetadata") private var appleRichMetadata = true
     @AppStorage("keepDownloadedSongs") private var keepDownloadedSongs = false
     @AppStorage("fullBackupSnapshots") private var fullBackupSnapshots = false
-    @AppStorage("downloadServer") private var downloadServer = DownloaderServerPreference.auto.rawValue
+    @AppStorage("downloadServer") private var downloadServer = DownloaderServerPreference.byeTunesAPI.rawValue
     @AppStorage("downloadSearchProvider") private var downloadSearchProvider = DownloadSearchProviderOption.appleMusic.rawValue
     @AppStorage("autoDownloadTier") private var autoDownloadTier = "high"
     @AppStorage("yoinkifyFormat") private var yoinkifyFormat = "flac"
@@ -49,12 +51,16 @@ struct SettingsView: View {
     @AppStorage("tidalFallbackQuality") private var tidalFallbackQuality = "LOSSLESS"
     
     var body: some View {
+        NavigationStack {
+        ZStack(alignment: .bottom) {   // ← outer ZStack: lets popups layer over content
+
         ZStack(alignment: .bottom) {
             Color(.systemGroupedBackground)
                 .ignoresSafeArea()
-            
-            ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+
+            GeometryReader { proxy in
+                ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 24) {
                 
                 Text("Settings")
                     .font(.system(size: 34, weight: .bold))
@@ -381,6 +387,53 @@ struct SettingsView: View {
                         RoundedRectangle(cornerRadius: 12)
                             .stroke(Color(.systemGray5), lineWidth: 1)
                     )
+                }
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("DEVICE LIBRARY")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(.secondary)
+                        .tracking(0.5)
+
+                    VStack(spacing: 0) {
+                        NavigationLink {
+                            DeviceLibraryBrowserView(manager: manager)
+                        } label: {
+                            HStack {
+                                Image(systemName: "music.note.list")
+                                    .font(.body)
+                                    .foregroundColor(.primary)
+                                    .frame(width: 28)
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("On-Device Library")
+                                        .font(.body)
+                                        .foregroundColor(.primary)
+                                    Text("Edit, delete, and export songs already on the phone")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+
+                                Spacer()
+
+                                Image(systemName: "chevron.right")
+                                    .font(.caption)
+                                    .foregroundColor(Color(.systemGray3))
+                            }
+                            .padding(.vertical, 14)
+                            .padding(.horizontal, 16)
+                        }
+                        .disabled(!manager.heartbeatReady)
+                        .opacity(manager.heartbeatReady ? 1 : 0.55)
+                    }
+                    .background(Color(.systemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color(.systemGray5), lineWidth: 1)
+                    )
+
                 }
 
                 VStack(alignment: .leading, spacing: 12) {
@@ -812,6 +865,98 @@ struct SettingsView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 12) {
+                    Text("SUPPORT")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(.secondary)
+                        .tracking(0.5)
+
+                    VStack(spacing: 0) {
+                        // ── Buy Me a Coffee row ──
+                        Button {
+                            openURL(URL(string: "https://buymeacoffee.com/EduAlexxis")!)
+                        } label: {
+                            HStack {
+                                Image(systemName: "cup.and.saucer.fill")
+                                    .font(.body)
+                                    .foregroundColor(.primary)
+                                    .frame(width: 28)
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Buy Me a Coffee")
+                                        .font(.body)
+                                        .foregroundColor(.primary)
+                                    Text("Support ByeTunes development")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+
+                                Spacer()
+
+                                Image(systemName: "arrow.up.right")
+                                    .font(.caption)
+                                    .foregroundColor(Color(.systemGray3))
+                            }
+                            .padding(.vertical, 14)
+                            .padding(.horizontal, 16)
+                        }
+
+                        // ── Supporters row ──
+                        Divider().padding(.leading, 44)
+
+                        HStack(alignment: .top) {
+                            Image(systemName: "heart.fill")
+                                .font(.body)
+                                .foregroundColor(.pink)
+                                .frame(width: 28)
+
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Supporters")
+                                    .font(.body)
+                                    .foregroundColor(.primary)
+
+                                if !supportersLoaded {
+                                    ProgressView()
+                                        .scaleEffect(0.7)
+                                        .frame(height: 20)
+                                } else if supporters.isEmpty {
+                                    Text("Be the first to support!")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                } else {
+                                    // Wrap chips across multiple lines
+                                    FlowLayout(spacing: 6) {
+                                        ForEach(supporters, id: \.self) { name in
+                                            Text(name)
+                                                .font(.caption)
+                                                .fontWeight(.medium)
+                                                .foregroundColor(.primary)
+                                                .padding(.horizontal, 10)
+                                                .padding(.vertical, 4)
+                                                .background(Color(.systemGray6))
+                                                .clipShape(Capsule())
+                                        }
+                                    }
+                                }
+                            }
+
+                            Spacer()
+                        }
+                        .padding(.vertical, 14)
+                        .padding(.horizontal, 16)
+                    }
+                    .background(Color(.systemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color(.systemGray5), lineWidth: 1)
+                    )
+                    .task {
+                        await fetchSupporters()
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 12) {
                     Text("DANGER ZONE")
                         .font(.caption)
                         .fontWeight(.medium)
@@ -843,11 +988,17 @@ struct SettingsView: View {
                         )
                     }
                 }
+
                 
 
+                }
+                .frame(width: max(proxy.size.width - 40, 0), alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 100)
+                }
+                .frame(width: proxy.size.width, alignment: .topLeading)
+                .clipped()
             }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 100)
         }
         .sheet(isPresented: $showingPairingPicker) {
             DocumentPicker(types: [.data, .xml, .propertyList, .item]) { url in
@@ -909,26 +1060,28 @@ struct SettingsView: View {
             refreshSnapshots()
         }
 
+        // ── Overlays (inside outer ZStack so they layer correctly) ──
+
         if isFixingArtwork || isRebuildingAlbumArtwork {
             artworkFixPopup
-                .zIndex(90)
+                .transition(.opacity.combined(with: .scale(scale: 0.97)))
         }
 
         if isSnapshotBusy && (isCreatingSnapshot || isRestoringSnapshot) {
             snapshotProgressPopup
-                .zIndex(95)
+                .transition(.opacity.combined(with: .scale(scale: 0.97)))
         }
-            
+
         if showToast {
             HStack(spacing: 12) {
                 Image(systemName: toastIcon)
                     .font(.system(size: 24))
                     .foregroundColor(.secondary)
-                
+
                 Text(toastTitle)
                     .font(.subheadline.weight(.medium))
                     .foregroundColor(.primary)
-                
+
                 Spacer()
             }
             .padding(.horizontal, 16)
@@ -939,10 +1092,43 @@ struct SettingsView: View {
             .padding(.horizontal, 24)
             .padding(.bottom, 100)
             .transition(.move(edge: .bottom).combined(with: .opacity))
-            .zIndex(100)
         }
-        } // ZStack
+
+        } // ← outer ZStack
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: isFixingArtwork)
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: isRebuildingAlbumArtwork)
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: isSnapshotBusy)
+        .animation(.spring(), value: showToast)
+        }
     } // body
+
+    // MARK: - Supporters
+
+    private func fetchSupporters() async {
+        guard !supportersLoaded || supporters.isEmpty else { return }
+        
+        let timestamp = Int(Date().timeIntervalSince1970)
+        guard let url = URL(string: "https://raw.githubusercontent.com/EduAlexxis/EduAlexxis-Altstore-Repo/main/supporters.json?t=\(timestamp)") else { return }
+        
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 10
+        
+        do {
+            let (data, _) = try await URLSession.shared.data(for: request)
+            struct Response: Decodable { let supporters: [String] }
+            let decoded = try JSONDecoder().decode(Response.self, from: data)
+            await MainActor.run {
+                supporters = decoded.supporters
+                supportersLoaded = true
+            }
+        } catch {
+            print("Failed to fetch supporters: \(error)")
+            await MainActor.run {
+                supportersLoaded = true
+            }
+        }
+    }
 
     private var isExperimentalArtworkRefreshActive: Bool {
         isRebuildingAlbumArtwork && !isFixingArtwork
@@ -989,6 +1175,21 @@ struct SettingsView: View {
                         .multilineTextAlignment(.center)
                         .lineLimit(3)
                         .frame(maxWidth: .infinity)
+                }
+
+                Button {
+                    manager.artworkRepairCancelled = true
+                    isRebuildingAlbumArtwork = false
+                    isFixingArtwork = false
+                    artworkFixMessage = "Cancelling..."
+                } label: {
+                    Text("Cancel")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Color(.systemGray6))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
                 }
             }
             .padding(24)
@@ -1104,7 +1305,7 @@ struct SettingsView: View {
 
         downloadNext(0)
     }
-    
+
     private func createSnapshotBackup() {
         isSnapshotBusy = true
         isCreatingSnapshot = true
@@ -1239,6 +1440,8 @@ struct SettingsView: View {
         } completion: { success, message in
             DispatchQueue.main.async {
                 self.isFixingArtwork = false
+                // Silently dismiss if user already cancelled via the Cancel button
+                guard !message.lowercased().contains("cancel") else { return }
                 self.updateArtworkFixProgress(message)
                 self.showToastMessage(
                     title: success ? message : "Artwork Fix Failed: \(message)",
@@ -1259,6 +1462,8 @@ struct SettingsView: View {
         } completion: { success, message in
             DispatchQueue.main.async {
                 self.isRebuildingAlbumArtwork = false
+                // Silently dismiss if user already cancelled via the Cancel button
+                guard !message.lowercased().contains("cancel") else { return }
                 self.updateArtworkFixProgress(message)
                 self.showToastMessage(
                     title: success ? message : "Advanced Artwork & Metadata Fix Failed: \(message)",
@@ -1356,6 +1561,8 @@ struct SettingsView: View {
 }
 
 private struct DownloaderSettingsScreen: View {
+    @StateObject private var backendHealthStore = BackendHealthStore.shared
+
     @Binding var metadataSource: String
     @Binding var autofetchMetadata: Bool
     @Binding var fetchLyrics: Bool
@@ -1373,8 +1580,38 @@ private struct DownloaderSettingsScreen: View {
 
     let downloadFolderSubtitle: String
 
-    private var selectedServer: DownloaderServerPreference {
-        DownloaderServerPreference(rawValue: downloadServer) ?? .auto
+    private var selectedServer: DownloaderServerPreference { .auto }
+
+    private var relevantHealthRecords: [BackendHealthRecord] {
+        let all = backendHealthStore.reportItems()
+        switch selectedServer {
+        case .auto:
+            return all.filter { $0.label == "ByeTunes API" || $0.label == "Deezer API (Zarz)" }
+        case .byeTunesAPI:
+            return all.filter { $0.label == "ByeTunes API" || $0.label == "ByeTunes API (MP3 Fallback)" }
+        case .yoinkify:
+            return all.filter { $0.label == "Yoinkify" }
+        case .qobuz:
+            return all.filter { $0.label == "Qobuz API (Zarz)" }
+        case .appleMusicAPI:
+            return all.filter { $0.label == "Apple Music API (app2)" || $0.label == "Apple Music API (app)" }
+        case .deezerAPI:
+            return all.filter { $0.label == "Deezer API (Zarz)" }
+        case .tidalAPI:
+            return all.filter { $0.label == "Tidal API (tid2)" || $0.label == "Tidal API (tid)" }
+        case .pandoraAPI:
+            return all.filter { $0.label == "Pandora API (Zarz)" }
+        case .amazonAPI:
+            return all.filter { $0.label == "Amazon Music API (Zarz)" }
+        case .soundCloudAPI:
+            return all.filter { $0.label == "SoundCloud API (Cobalt)" }
+        case .youtubeAPI:
+            return all.filter { $0.label == "YouTube API (Cobalt)" }
+        case .hifiOne:
+            return all.filter { $0.label == "HiFi One" }
+        case .hifiTwo:
+            return all.filter { $0.label == "HiFi Two" }
+        }
     }
 
     var body: some View {
@@ -1382,8 +1619,9 @@ private struct DownloaderSettingsScreen: View {
             Color(.systemGroupedBackground)
                 .ignoresSafeArea()
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
+            GeometryReader { proxy in
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: 12) {
                     Text("METADATA")
                         .font(.caption)
                         .fontWeight(.medium)
@@ -1529,29 +1767,34 @@ private struct DownloaderSettingsScreen: View {
 
                         Divider().padding(.leading, 56)
 
-                        HStack {
-                            Image(systemName: "server.rack")
+                        HStack(alignment: .top, spacing: 12) {
+                            Image(systemName: backendHealthStore.isRefreshing ? "arrow.triangle.2.circlepath.circle.fill" : "waveform.path.ecg")
                                 .font(.body)
                                 .foregroundColor(.primary)
                                 .frame(width: 28)
 
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Downloader Server")
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Server Health")
                                     .font(.body)
-                                Text("Choose the backend used for song downloads")
+                                Text(serverHealthSummary)
                                     .font(.caption)
                                     .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
 
                             Spacer()
 
-                            Picker("Downloader Server", selection: $downloadServer) {
-                                ForEach(DownloaderServerPreference.allCases) { server in
-                                    Text(server.displayName).tag(server.rawValue)
+                            Button {
+                                backendHealthStore.refreshHealth(for: selectedServer, force: true)
+                            } label: {
+                                if backendHealthStore.isRefreshing {
+                                    ProgressView()
+                                } else {
+                                    Image(systemName: "arrow.clockwise")
+                                        .font(.caption.weight(.semibold))
                                 }
                             }
-                            .pickerStyle(.menu)
-                            .labelsHidden()
+                            .buttonStyle(.plain)
                         }
                         .padding(.vertical, 14)
                         .padding(.horizontal, 16)
@@ -1618,135 +1861,44 @@ private struct DownloaderSettingsScreen: View {
                             .stroke(Color(.systemGray5), lineWidth: 1)
                     )
 
-                    if selectedServer == .auto {
-                        Text("AUTO")
-                            .font(.caption)
-                            .fontWeight(.medium)
-                            .foregroundColor(.secondary)
-                            .tracking(0.5)
-                            .padding(.top, 8)
+                    Text("DOWNLOAD FORMAT")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(.secondary)
+                        .tracking(0.5)
+                        .padding(.top, 8)
 
-                        VStack(spacing: 0) {
-                            serverPickerRow(
-                                icon: "dial.low",
-                                title: "Automatic Quality",
-                                subtitle: "Controls both the Yoinkify attempt and the fallback chain",
-                                selection: $autoDownloadTier,
-                                options: DownloaderAutoTierOption.allCases
-                            )
-
-                            Divider().padding(.leading, 56)
-
-                            HStack(alignment: .top, spacing: 12) {
-                                Image(systemName: "info.circle")
-                                    .font(.body)
-                                    .foregroundColor(.primary)
-                                    .frame(width: 28)
-
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("Quality Mapping")
-                                        .font(.body)
-                                    Text(autoTierExplanation)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-
-                                Spacer(minLength: 0)
-                            }
-                            .padding(.vertical, 14)
-                            .padding(.horizontal, 16)
-                        }
-                        .background(Color(.systemBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color(.systemGray5), lineWidth: 1)
+                    VStack(spacing: 0) {
+                        serverPickerRow(
+                            icon: "sparkles.rectangle.stack",
+                            title: "Output Format",
+                            subtitle: "ByeTunes is used first, with Deezer as the automatic fallback",
+                            selection: $yoinkifyFormat,
+                            options: DownloaderYoinkifyFormatOption.allCases
                         )
                     }
+                    .background(Color(.systemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color(.systemGray5), lineWidth: 1)
+                    )
 
-                    if selectedServer == .yoinkify {
-                        Text("YOINKIFY")
-                            .font(.caption)
-                            .fontWeight(.medium)
-                            .foregroundColor(.secondary)
-                            .tracking(0.5)
-                            .padding(.top, 8)
-
-                        VStack(spacing: 0) {
-                            serverPickerRow(
-                                icon: "sparkles.rectangle.stack",
-                                title: "Output Format",
-                                subtitle: "Choose the direct download format for Yoinkify",
-                                selection: $yoinkifyFormat,
-                                options: DownloaderYoinkifyFormatOption.allCases
-                            )
-                        }
-                        .background(Color(.systemBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color(.systemGray5), lineWidth: 1)
-                        )
                     }
-
-                    if selectedServer == .qobuz {
-                        Text("QOBUZ")
-                            .font(.caption)
-                            .fontWeight(.medium)
-                            .foregroundColor(.secondary)
-                            .tracking(0.5)
-                            .padding(.top, 8)
-
-                        VStack(spacing: 0) {
-                            serverPickerRow(
-                                icon: "music.note.house",
-                                title: "Track Quality",
-                                subtitle: "Quality parameter used for the Qobuz fallback chain",
-                                selection: $qobuzFallbackQuality,
-                                options: DownloaderQobuzQualityOption.allCases
-                            )
-                        }
-                        .background(Color(.systemBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color(.systemGray5), lineWidth: 1)
-                        )
-                    }
-
-                    if selectedServer == .hifiOne || selectedServer == .hifiTwo {
-                        Text(selectedServer == .hifiOne ? "HIFI ONE" : "HIFI TWO")
-                            .font(.caption)
-                            .fontWeight(.medium)
-                            .foregroundColor(.secondary)
-                            .tracking(0.5)
-                            .padding(.top, 8)
-
-                        VStack(spacing: 0) {
-                            serverPickerRow(
-                                icon: "waveform",
-                                title: "Track Quality",
-                                subtitle: "Quality parameter used for the selected Tidal backend",
-                                selection: $tidalFallbackQuality,
-                                options: DownloaderTidalQualityOption.allCases
-                            )
-                        }
-                        .background(Color(.systemBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color(.systemGray5), lineWidth: 1)
-                        )
-                    }
-
+                    .frame(width: max(proxy.size.width - 40, 0), alignment: .leading)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 16)
                 }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 16)
+                .frame(width: proxy.size.width, alignment: .topLeading)
+                .clipped()
             }
         }
         .navigationTitle("Metadata & Downloads")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            downloadServer = DownloaderServerPreference.auto.rawValue
+            backendHealthStore.refreshHealth(for: selectedServer)
+        }
     }
 
     private func serverPickerRow<Option: Identifiable & CustomStringConvertible>(
@@ -1784,14 +1936,43 @@ private struct DownloaderSettingsScreen: View {
         .padding(.horizontal, 16)
     }
 
-    private var autoTierExplanation: String {
-        switch DownloaderAutoTierOption(rawValue: autoDownloadTier) ?? .high {
-        case .low:
-            return "Low tries MP3 from Yoinkify first, then Qobuz lossless, then low-quality Tidal fallback."
-        case .medium:
-            return "Medium keeps the fast Yoinkify path, then uses Qobuz hi-res, then high-quality Tidal fallback."
-        case .high:
-            return "High prefers FLAC from Yoinkify, then uses max Qobuz quality, then falls back to lossless Tidal."
+    private var serverHealthSummary: String {
+        if backendHealthStore.isRefreshing && relevantHealthRecords.allSatisfy({ $0.lastUpdatedAt == .distantPast }) {
+            return "Checking ByeTunes and Deezer..."
+        }
+
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+
+        if selectedServer == .auto || selectedServer == .qobuz {
+            let reachable = relevantHealthRecords.filter { $0.lastOutcome == "Healthy" }.count
+            let checked = relevantHealthRecords.filter { $0.lastUpdatedAt != .distantPast }.count
+
+            if checked == 0 {
+                return "Not checked yet."
+            }
+
+            if let lastUsed = backendHealthStore.lastUsedLabel {
+                return "\(reachable) of \(relevantHealthRecords.count) reachable. Last used: \(lastUsed)."
+            }
+
+            return "\(reachable) of \(relevantHealthRecords.count) reachable."
+        }
+
+        guard let record = relevantHealthRecords.first else {
+            return "Not checked yet."
+        }
+
+        switch record.lastOutcome {
+        case "Healthy":
+            let relative = record.lastUpdatedAt == .distantPast ? "not checked yet" : formatter.localizedString(for: record.lastUpdatedAt, relativeTo: Date())
+            return "Reachable. Checked \(relative)."
+        case "Failing":
+            let relative = record.lastUpdatedAt == .distantPast ? "just now" : formatter.localizedString(for: record.lastUpdatedAt, relativeTo: Date())
+            let reason = record.lastError?.isEmpty == false ? record.lastError! : "request failed"
+            return "Currently failing. Checked \(relative). \(reason)"
+        default:
+            return "Not checked yet."
         }
     }
 }
@@ -1816,11 +1997,12 @@ private enum MetadataSourceOption: String, CaseIterable, Identifiable, CustomStr
 
 private enum DownloadSearchProviderOption: String, CaseIterable, Identifiable, CustomStringConvertible {
     case appleMusic
+    case spotify
     case tidal
     case metadata
 
     static var allCases: [DownloadSearchProviderOption] {
-        [.appleMusic, .metadata]
+        [.appleMusic, .spotify, .metadata]
     }
 
     var id: String { rawValue }
@@ -1828,6 +2010,7 @@ private enum DownloadSearchProviderOption: String, CaseIterable, Identifiable, C
     var description: String {
         switch self {
         case .appleMusic: return "Apple Music"
+        case .spotify: return "Spotify"
         case .tidal: return "Tidal"
         case .metadata: return "iTunes + Deezer"
         }
@@ -1913,6 +2096,48 @@ private enum DownloaderQobuzQualityOption: String, CaseIterable, Identifiable, C
         case .lossless: return "Lossless"
         case .hiRes: return "Hi-Res"
         case .hiResMax: return "Max Hi-Res"
+        }
+    }
+}
+
+// MARK: - FlowLayout
+// A simple left-to-right wrapping layout for supporter chips.
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) -> CGSize {
+        let containerWidth = proposal.width ?? 0
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x + size.width > containerWidth, x > 0 {
+                x = 0
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
+        y += rowHeight
+        return CGSize(width: containerWidth, height: y)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) {
+        var x = bounds.minX
+        var y = bounds.minY
+        var rowHeight: CGFloat = 0
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x + size.width > bounds.maxX, x > bounds.minX {
+                x = bounds.minX
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            subview.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
         }
     }
 }

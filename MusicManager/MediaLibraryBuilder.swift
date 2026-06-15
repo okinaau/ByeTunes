@@ -158,6 +158,18 @@ enum MediaLibraryError: Error, LocalizedError {
 }
 
 class MediaLibraryBuilder {
+    private static func shouldWriteAppleCatalogStoreFields(for song: SongMetadata) -> Bool {
+        guard song.storeId > 0 else { return false }
+
+        let metadataSource = UserDefaults.standard.string(forKey: "metadataSource") ?? "local"
+        let richAppleMetadata = UserDefaults.standard.bool(forKey: "appleRichMetadata")
+
+        if metadataSource == "apple" {
+            return true
+        }
+
+        return richAppleMetadata
+    }
     
     
     
@@ -612,6 +624,8 @@ class MediaLibraryBuilder {
         var updateAlbums: [String: Int64] = [:]
         var newGenres: [String: Int64] = [:]
         var newAlbumArtists: [String: Int64] = [:]
+        var updateArtists: [String: Int64] = [:]
+        var updateAlbumArtists: [String: Int64] = [:]
         
         var artistStoreIds: [String: Int64] = [:]
         var albumArtistStoreIds: [String: Int64] = [:]
@@ -651,6 +665,10 @@ class MediaLibraryBuilder {
             let artistPid: Int64
             if let existing = artists[song.artist] {
                 artistPid = existing
+                if song.artistId > 0 {
+                    artistStoreIds[song.artist] = song.artistId
+                    updateArtists[song.artist] = artistPid
+                }
             } else {
                 let newPid = SongMetadata.generatePersistentId()
                 artists[song.artist] = newPid
@@ -665,6 +683,10 @@ class MediaLibraryBuilder {
             let albumArtistPid: Int64
             if let existing = albumArtists[effectiveAlbumArtistName] {
                 albumArtistPid = existing
+                if song.artistId > 0 {
+                    albumArtistStoreIds[effectiveAlbumArtistName] = song.artistId
+                    updateAlbumArtists[effectiveAlbumArtistName] = albumArtistPid
+                }
             } else {
                 let newPid = SongMetadata.generatePersistentId()
                 albumArtists[effectiveAlbumArtistName] = newPid
@@ -678,6 +700,10 @@ class MediaLibraryBuilder {
             let albumPid: Int64
             if let existing = albums[song.album] {
                 albumPid = existing.pid
+                if song.playlistId > 0 {
+                    albumStoreIds[song.album] = song.playlistId
+                    updateAlbums[song.album] = albumPid
+                }
                 if (existing.year == 0 || existing.year == 2003 || existing.year != song.year) && song.year != 0 {
                     updateAlbums[song.album] = albumPid
                     albums[song.album] = (pid: albumPid, year: song.year)
@@ -808,24 +834,40 @@ class MediaLibraryBuilder {
                 .sorted()
                 .joined(separator: ",")
                 .replacingOccurrences(of: "'", with: "''")
-            let subscriptionStoreItemId = (song.isDolbyAtmosCapable || song.hasSpatialAudioTrait) && song.storeId > 0
+            let hasAppleCatalogMatch = shouldWriteAppleCatalogStoreFields(for: song)
+            let subscriptionStoreItemId = (song.isDolbyAtmosCapable || song.hasSpatialAudioTrait) && hasAppleCatalogMatch
                 ? song.storeId
                 : 0
             let masteredForItunes = (song.isMasteredForItunes || song.isAppleDigitalMaster) ? 1 : 0
+            let matchRedownloadParamsEscaped = hasAppleCatalogMatch
+                ? "sagaId=\\(song.storeId)".replacingOccurrences(of: "'", with: "''")
+                : ""
+            let storeSagaId = hasAppleCatalogMatch ? song.storeId : 0
+            let cloudStatus = hasAppleCatalogMatch ? 8 : 0
+            let cloudAssetAvailable = hasAppleCatalogMatch ? 1 : 0
+            let cloudInMyLibrary = hasAppleCatalogMatch ? 1 : 0
+            let playbackEndpointType = subscriptionStoreItemId > 0 ? 3 : 0
+            let cloudPlaybackEndpointType = hasAppleCatalogMatch ? 3 : 0
+            let isSubscription = (version.isSubscription || hasAppleCatalogMatch) ? 1 : 0
             try executeSQL(db, """
                 INSERT OR REPLACE INTO item_store (
                     item_pid, sync_id, sync_in_my_library, is_subscription,
+                    store_saga_id, match_redownload_params, cloud_status,
                     store_xid, store_item_id, storefront_id,
                     store_composer_id, store_genre_id, store_playlist_id,
                     date_released, subscription_store_item_id,
-                    is_mastered_for_itunes, store_flavor
+                    is_mastered_for_itunes, store_flavor,
+                    cloud_asset_available, cloud_in_my_library,
+                    playback_endpoint_type, cloud_playback_endpoint_type
                 ) VALUES (
-                    \(itemPid), \(syncId), 1, \(version.isSubscription ? 1 : 0),
+                    \(itemPid), \(syncId), 1, \(isSubscription),
+                    \(storeSagaId), '\(matchRedownloadParamsEscaped)', \(cloudStatus),
                     '\(storeXidEscaped)', \(song.storeId), \(song.storefrontId),
                     \(song.composerId), \(song.genreStoreId), \(song.playlistId),
                     \(song.releaseDate), \(subscriptionStoreItemId),
-                    \(masteredForItunes), '\(storeFlavorEscaped)'
-                )
+                    \(masteredForItunes), '\(storeFlavorEscaped)',
+                    \(cloudAssetAvailable), \(cloudInMyLibrary),
+                    \(playbackEndpointType), \(cloudPlaybackEndpointType))
             """)
             let hlsAssetTraits = song.isDolbyAtmosCapable ? 32 : 0
             try executeSQL(db, """
@@ -1131,7 +1173,14 @@ class MediaLibraryBuilder {
                 VALUES (\(artistPid), '\(escapedName)', '\(escapedName)', '', X'\(groupingHex)', \(syncId), 1, \(repItem), \(storeId))
             """)
         }
-        
+
+        for (artistName, artistPid) in updateArtists {
+            let storeId = artistStoreIds[artistName] ?? 0
+            guard storeId > 0 else { continue }
+            try executeSQL(db, "UPDATE item_artist SET store_id = \(storeId) WHERE item_artist_pid = \(artistPid) AND IFNULL(store_id, 0) = 0")
+            Logger.shared.log("[MediaLibraryBuilder] Updating existing item_artist store_id to \(storeId) for: \(artistName)")
+        }
+
         
         for (artistName, aaPid) in newAlbumArtists {
             let escapedName = artistName.replacingOccurrences(of: "'", with: "''")
@@ -1164,7 +1213,14 @@ class MediaLibraryBuilder {
                 """)
             }
         }
-        
+
+        for (artistName, aaPid) in updateAlbumArtists {
+            let storeId = albumArtistStoreIds[artistName] ?? 0
+            guard storeId > 0 else { continue }
+            try executeSQL(db, "UPDATE album_artist SET store_id = \(storeId) WHERE album_artist_pid = \(aaPid) AND IFNULL(store_id, 0) = 0")
+            Logger.shared.log("[MediaLibraryBuilder] Updating existing album_artist store_id to \(storeId) for: \(artistName)")
+        }
+
         
         let hasAlbumStoreId = version.hasAlbumStoreId && columnExists(db: db, tableName: "album", columnName: "store_id")
         for (albumName, albumPid) in newAlbums {
@@ -1194,9 +1250,18 @@ class MediaLibraryBuilder {
         }
         
         for (albumName, albumPid) in updateAlbums {
-            if let song = songs.first(where: { $0.album == albumName }), song.year != 0 {
-                try executeSQL(db, "UPDATE album SET album_year = \(song.year) WHERE album_pid = \(albumPid)")
-                Logger.shared.log("[MediaLibraryBuilder] Updating existing album year to \(song.year) for: \(albumName)")
+            if let song = songs.first(where: { $0.album == albumName }) {
+                var updateClauses: [String] = []
+                if song.year != 0 {
+                    updateClauses.append("album_year = \(song.year)")
+                }
+                if hasAlbumStoreId, let storeId = albumStoreIds[albumName], storeId > 0 {
+                    updateClauses.append("store_id = CASE WHEN IFNULL(store_id, 0) = 0 THEN \(storeId) ELSE store_id END")
+                }
+                if !updateClauses.isEmpty {
+                    try executeSQL(db, "UPDATE album SET \(updateClauses.joined(separator: ", ")) WHERE album_pid = \(albumPid)")
+                    Logger.shared.log("[MediaLibraryBuilder] Updating existing album metadata for \(albumName): year=\(song.year), store_id=\(albumStoreIds[albumName] ?? 0)")
+                }
             }
         }
         
@@ -1934,6 +1999,19 @@ class MediaLibraryBuilder {
     private static func colorAnalysisJSON(for song: SongMetadata, version: DatabaseVersion) -> String {
         guard version.supportsIOS264ArtworkDisplay else {
             return fallbackColorAnalysisJSON()
+        }
+
+        // User-set custom color takes top priority over everything else.
+        if let customHex = song.customAlbumBackgroundColor,
+           let background = rgbColor(from: customHex) {
+            let backgroundLight = relativeLuminance(red: background.r, green: background.g, blue: background.b) > 0.62
+            let textLight = !backgroundLight
+            let primary = textLight ? mix(background, with: (255, 255, 255), amount: 0.92) : mix(background, with: (0, 0, 0), amount: 0.86)
+            let secondary = textLight ? mix(background, with: (255, 255, 255), amount: 0.82) : mix(background, with: (0, 0, 0), amount: 0.72)
+            let tertiary = textLight ? mix(background, with: (255, 255, 255), amount: 0.66) : mix(background, with: (0, 0, 0), amount: 0.58)
+            return """
+            {"ColorAnalysis":{"1":{"primaryTextColorLight":"\(textLight ? "YES" : "NO")","secondaryTextColorLight":"\(textLight ? "YES" : "NO")","secondaryTextColor":"\(hexColor(secondary))","tertiaryTextColorLight":"NO","primaryTextColor":"\(hexColor(primary))","tertiaryTextColor":"\(hexColor(tertiary))","backgroundColorLight":"\(backgroundLight ? "YES" : "NO")","backgroundColor":"\(hexColor(background))"}}}
+            """
         }
 
         if let appleColors = song.appleMusicArtworkColors,

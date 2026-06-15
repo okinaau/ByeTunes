@@ -5,8 +5,7 @@ struct LogViewer: View {
     @ObservedObject var logger = Logger.shared
     @Environment(\.presentationMode) var presentationMode
     
-    @State private var showingShareSheet = false
-    @State private var logURL: URL?
+    @State private var shareItem: SharedLogFile?
     @State private var showCopiedBanner = false
     
     var body: some View {
@@ -51,18 +50,15 @@ struct LogViewer: View {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button(action: {
                         if let url = logger.saveLogs() {
-                            self.logURL = url
-                            self.showingShareSheet = true
+                            shareItem = SharedLogFile(url: url)
                         }
                     }) {
                         Image(systemName: "square.and.arrow.up")
                     }
                 }
             }
-            .sheet(isPresented: $showingShareSheet) {
-                if let url = logURL {
-                    LogShareSheet(activityItems: [url])
-                }
+            .sheet(item: $shareItem) { item in
+                LogShareSheet(activityItems: [item.url])
             }
             .overlay(alignment: .bottom) {
                 if showCopiedBanner {
@@ -85,6 +81,11 @@ struct LogViewer: View {
             }
         }
     }
+}
+
+private struct SharedLogFile: Identifiable {
+    let id = UUID()
+    let url: URL
 }
 
 struct LogShareSheet: UIViewControllerRepresentable {

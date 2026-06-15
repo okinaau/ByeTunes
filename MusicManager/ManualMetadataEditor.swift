@@ -4,6 +4,7 @@ import PhotosUI
 struct ManualMetadataEditor: View {
     @Binding var song: SongMetadata
     @Binding var isPresented: Bool
+    var onSave: ((SongMetadata) -> Void)? = nil
     
     @State private var title: String = ""
     @State private var artist: String = ""
@@ -13,22 +14,49 @@ struct ManualMetadataEditor: View {
     @State private var trackNumber: String = ""
     @State private var lyrics: String = ""
     @State private var isExplicit: Bool = false
-    
+
+    // Custom album background color
+    @State private var useCustomAlbumColor: Bool = false
+    @State private var customAlbumColor: Color = .black
+
     @State private var artworkItem: PhotosPickerItem?
     @State private var originalArtworkData: Data?
     @State private var artworkData: Data?
     @State private var pendingArtworkData: Data?
     @State private var showingArtworkCropper = false
-    
+
     @State private var showingSearchSheet = false
     @State private var showingLyricsSearchSheet = false
-    
+
     @AppStorage("metadataSource") private var metadataSource = "local"
-    
+
     @FocusState private var focusedField: Field?
-    
+
     enum Field {
         case title, artist, album, genre, year, trackNumber
+    }
+
+    // MARK: - Color helpers
+
+    private static func hexString(from color: Color) -> String {
+        let uiColor = UIColor(color)
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        uiColor.getRed(&r, green: &g, blue: &b, alpha: &a)
+        let ri = Int(r * 255)
+        let gi = Int(g * 255)
+        let bi = Int(b * 255)
+        return String(format: "#%02X%02X%02X", ri, gi, bi)
+    }
+
+    private static func color(fromHex hex: String) -> Color? {
+        let normalized = hex
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "#", with: "")
+        guard normalized.count == 6, let value = Int(normalized, radix: 16) else { return nil }
+        let r = Double((value >> 16) & 0xFF) / 255.0
+        let g = Double((value >> 8) & 0xFF) / 255.0
+        let b = Double(value & 0xFF) / 255.0
+        return Color(red: r, green: g, blue: b)
     }
     
     var body: some View {
@@ -166,6 +194,51 @@ struct ManualMetadataEditor: View {
                         }
                     }
                     .padding(.vertical, 4)
+
+                    Toggle(isOn: $useCustomAlbumColor) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "paintpalette.fill")
+                                .foregroundStyle(.linearGradient(
+                                    colors: [.purple, .pink, .orange],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ))
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Custom Album Color")
+                                    .font(.body)
+                                Text("Overrides background in Music app")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+
+                    if useCustomAlbumColor {
+                        HStack {
+                            ColorPicker("Background Color", selection: $customAlbumColor, supportsOpacity: false)
+                                .labelsHidden()
+                            Spacer()
+                            // live preview swatch
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(customAlbumColor)
+                                    .frame(width: 40, height: 40)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .strokeBorder(Color(.systemGray4), lineWidth: 1)
+                                    )
+                                    .shadow(color: customAlbumColor.opacity(0.4), radius: 4, x: 0, y: 2)
+                                Text("A")
+                                    .font(.system(size: 16, weight: .bold))
+                                    .foregroundColor(isLightColor(customAlbumColor) ? .black : .white)
+                            }
+                            Text(Self.hexString(from: customAlbumColor))
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 4)
+                    }
                 } header: {
                     Text("Details")
                 }
@@ -217,6 +290,9 @@ struct ManualMetadataEditor: View {
             .onAppear {
                 loadFieldsFromSong()
             }
+            .task(id: song.id) {
+                await loadFullResolutionArtworkIfNeeded()
+            }
             .onChange(of: artworkItem, perform: { newItem in
                 Task {
                     if let data = try? await newItem?.loadTransferable(type: Data.self) {
@@ -254,6 +330,15 @@ struct ManualMetadataEditor: View {
         }
     }
     
+    private func isLightColor(_ color: Color) -> Bool {
+        let uiColor = UIColor(color)
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        uiColor.getRed(&r, green: &g, blue: &b, alpha: &a)
+        // Relative luminance formula
+        let luminance = 0.2126 * Double(r) + 0.7152 * Double(g) + 0.0722 * Double(b)
+        return luminance > 0.62
+    }
+
     private func loadFieldsFromSong() {
         title = song.title
         artist = song.artist
@@ -264,10 +349,34 @@ struct ManualMetadataEditor: View {
             trackNumber = String(track)
         }
         lyrics = song.lyrics ?? ""
-        artworkData = song.artworkData
-        originalArtworkData = song.artworkData
+        let resolvedArtworkData = song.artworkData ?? song.artworkPreviewData
+        artworkData = resolvedArtworkData
+        originalArtworkData = resolvedArtworkData
         pendingArtworkData = nil
         isExplicit = song.explicitRating > 0
+        if let hex = song.customAlbumBackgroundColor,
+           let color = Self.color(fromHex: hex) {
+            useCustomAlbumColor = true
+            customAlbumColor = color
+        } else {
+            useCustomAlbumColor = false
+            customAlbumColor = .black
+        }
+    }
+
+    @MainActor
+    private func applyResolvedArtwork(_ data: Data) {
+        artworkData = data
+        originalArtworkData = data
+        song.artworkData = data
+    }
+
+    private func loadFullResolutionArtworkIfNeeded() async {
+        guard song.artworkData == nil, song.artworkPreviewData != nil else { return }
+        guard let fullArtworkData = await SongMetadata.extractEmbeddedArtwork(from: song.localURL) else { return }
+        await MainActor.run {
+            applyResolvedArtwork(fullArtworkData)
+        }
     }
     
     private func saveChanges() {
@@ -289,9 +398,14 @@ struct ManualMetadataEditor: View {
         }
         updatedSong.lyrics = lyrics.isEmpty ? nil : lyrics
         updatedSong.artworkData = artworkData
+        if let artworkData {
+            updatedSong.artworkPreviewData = artworkData
+        }
         updatedSong.explicitRating = isExplicit ? 1 : 0
-        
+        updatedSong.customAlbumBackgroundColor = useCustomAlbumColor ? Self.hexString(from: customAlbumColor) : nil
+
         song = updatedSong
+        onSave?(updatedSong)
         isPresented = false
     }
     

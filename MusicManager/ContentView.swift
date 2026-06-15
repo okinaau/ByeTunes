@@ -9,7 +9,7 @@ struct AppUpdateInfo: Identifiable, Equatable {
 }
 
 enum AppUpdateChecker {
-    static let currentVersion = "2.2"
+    static let currentVersion = "2.3"
     static let releasesURL = URL(string: "https://github.com/EduAlexxis/ByeTunes/releases")!
 
     private struct GitHubRelease: Decodable {
@@ -81,6 +81,7 @@ enum AppUpdateChecker {
 }
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject var manager = DeviceManager.shared
     @State private var status = "Ready"
     @State private var songs: [SongMetadata] = []
@@ -88,6 +89,7 @@ struct ContentView: View {
     @State private var isInjecting = false
     @State private var selectedTab = 0
     @State private var hasCompletedOnboarding = false
+    @AppStorage("tutorialComplete") private var tutorialComplete = false
     @State private var showSplash = true
     @State private var showingLogViewer = false
     @State private var showingRPPairingUpgradePicker = false
@@ -142,7 +144,17 @@ struct ContentView: View {
                 }
             }
 
-            if !showSplash && manager.needsRPPairingFileUpgrade {
+            if !showSplash && hasCompletedOnboarding && !tutorialComplete {
+                TutorialOverlayView(
+                    isComplete: $tutorialComplete,
+                    songs: $songs,
+                    selectedTab: $selectedTab,
+                    downloadTabIndex: isIOS26OrLater ? 1 : 1
+                )
+                .zIndex(1)
+            }
+
+            if !showSplash && manager.shouldPromptForRPPairingUpgrade {
                 RPPairingUpgradePrompt(
                     errorMessage: rpPairingUpgradeError,
                     importAction: {
@@ -191,18 +203,55 @@ struct ContentView: View {
                 }
             }
             manager.refreshExpectedPairingFileState()
-            hasCompletedOnboarding = manager.hasValidExpectedPairingFile || manager.needsRPPairingFileUpgrade
+            hasCompletedOnboarding = manager.hasValidExpectedPairingFile
             if manager.hasValidExpectedPairingFile {
                 manager.startHeartbeat()
             }
             
-            
+            restorePersistedSongQueueIfNeeded()
             checkPendingInjections()
             checkForAppUpdate()
         }
         .onOpenURL { url in
+            // Handle incoming Apple Music / Spotify links via URL open
+            let host = (url.host ?? "").lowercased()
+            if host.contains("spotify.com") || host.contains("music.apple.com") {
+                if let normalized = LinkNormalizer.normalize(url) {
+                    // Determine Download tab index (depends on whether Ringtones tab is shown on this OS)
+                    let major = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+                    let showRingtonesTab = (16...18).contains(major)
+                    let downloadTabIndex = showRingtonesTab ? 2 : 1
+                    // Switch to Download tab and notify listeners
+                    self.selectedTab = downloadTabIndex
+                    NotificationCenter.default.post(name: NSNotification.Name("IncomingMusicLink"), object: normalized.normalizedURL.absoluteString)
+                }
+                return
+            }
             
             handleIncomingFile(url)
+        }
+        .onChange(of: scenePhase) { newPhase in
+            guard newPhase == .active else { return }
+            attemptAutoReconnectIfNeeded()
+        }
+        .onChange(of: songsPersistenceSignature) { _ in
+            persistSongQueue(songs)
+        }
+    }
+
+    private var songsPersistenceSignature: [String] {
+        songs.map { song in
+            [
+                song.localURL.path,
+                song.title,
+                song.artist,
+                song.album,
+                song.remoteFilename,
+                String(song.fileSize),
+                String(song.durationMs),
+                String(song.trackNumber ?? 0),
+                String(song.discNumber ?? 0)
+            ].joined(separator: "|")
         }
     }
 
@@ -217,6 +266,17 @@ struct ContentView: View {
                 Logger.shared.log("[Update] Version check failed: \(error.localizedDescription)")
             }
         }
+    }
+
+    private func attemptAutoReconnectIfNeeded() {
+        guard scenePhase == .active, !showSplash, hasCompletedOnboarding else { return }
+
+        manager.refreshExpectedPairingFileState()
+        guard manager.hasValidExpectedPairingFile,
+              !manager.heartbeatReady,
+              manager.connectionStatus != "Connecting..." else { return }
+
+        manager.startHeartbeat()
     }
 
     private func handleRPPairingUpgradeImport(url: URL?) {
@@ -245,6 +305,22 @@ struct ContentView: View {
             let ext = fileURL.pathExtension.lowercased()
             guard audioExts.contains(ext) else { continue }
             try? FileManager.default.removeItem(at: fileURL)
+        }
+    }
+
+    private func restorePersistedSongQueueIfNeeded() {
+        guard songs.isEmpty else { return }
+        let restored = QueuePersistenceStore.loadMusicQueue()
+        guard !restored.isEmpty else { return }
+        songs = restored
+        Logger.shared.log("[ContentView] Restored \(restored.count) queued song(s) from last session")
+    }
+
+    private func persistSongQueue(_ updatedSongs: [SongMetadata]) {
+        if updatedSongs.isEmpty {
+            QueuePersistenceStore.clearMusicQueue()
+        } else {
+            QueuePersistenceStore.saveMusicQueue(updatedSongs)
         }
     }
     

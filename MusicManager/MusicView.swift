@@ -33,6 +33,8 @@ struct MusicView: View {
     
     @State private var currentInjectIndex = 0
     @State private var totalInjectCount = 0
+    @State private var isMinimalBatchInjectionMode = false
+    @State private var showingBatchMetadataEditor = false
     
     
     @State private var selectedSongForMatch: SongMetadata?
@@ -63,8 +65,26 @@ struct MusicView: View {
     }
 
     private var shouldHideQueueDuringLargeImport: Bool {
-        isImporting && totalImportCount > 100
+        isImporting && totalImportCount >= Self.largeBatchThreshold
     }
+
+    private var shouldHideQueueDuringLargeInjection: Bool {
+        isInjecting && isMinimalBatchInjectionMode
+    }
+
+    private var shouldUseCompactQueueForLargeBatch: Bool {
+        songs.count >= Self.largeBatchThreshold
+    }
+
+    private var shouldUseMinimalQueueUI: Bool {
+        shouldHideQueueDuringLargeImport || shouldHideQueueDuringLargeInjection || shouldUseCompactQueueForLargeBatch
+    }
+
+    private var shouldShowBatchMetadataEditorTrigger: Bool {
+        !songs.isEmpty && songs.count >= Self.largeBatchThreshold && !isImporting
+    }
+
+    private static let largeBatchThreshold = 50
     
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -200,7 +220,7 @@ struct MusicView: View {
                 }
                 
                 
-                if !songs.isEmpty && !isInjecting && !shouldHideQueueDuringLargeImport {
+                if !songs.isEmpty && !isInjecting && !shouldUseMinimalQueueUI {
                     HStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundColor(.orange)
@@ -229,8 +249,8 @@ struct MusicView: View {
                         
                         Spacer()
                         
-                        if shouldHideQueueDuringLargeImport {
-                            Text("Appears after import")
+                        if shouldUseMinimalQueueUI {
+                            Text("\(songs.count) songs")
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
                         } else if !songs.isEmpty {
@@ -239,8 +259,29 @@ struct MusicView: View {
                                 .foregroundColor(.secondary)
                         }
                     }
+
+                    if shouldShowBatchMetadataEditorTrigger && !shouldUseMinimalQueueUI {
+                        Button {
+                            showingBatchMetadataEditor = true
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: "slider.horizontal.3")
+                                Text("Review Batch Metadata")
+                                    .fontWeight(.medium)
+                                Spacer()
+                                Text("\(songs.count)")
+                                    .foregroundColor(.secondary)
+                            }
+                            .font(.subheadline)
+                            .foregroundColor(.primary)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
+                            .background(Color(.systemGray6))
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }
+                    }
                     
-                    if shouldHideQueueDuringLargeImport {
+                    if shouldUseMinimalQueueUI {
                         VStack(alignment: .leading, spacing: 16) {
                             HStack(alignment: .center, spacing: 12) {
                                 ZStack {
@@ -248,18 +289,18 @@ struct MusicView: View {
                                         .stroke(Color(.systemGray5), lineWidth: 8)
                                         .frame(width: 48, height: 48)
                                     Circle()
-                                        .trim(from: 0, to: totalImportCount > 0 ? CGFloat(currentImportIndex) / CGFloat(totalImportCount) : 0)
+                                        .trim(from: 0, to: progressRingValue)
                                         .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 8, lineCap: .round))
                                         .frame(width: 48, height: 48)
                                         .rotationEffect(.degrees(-90))
-                                    Text(totalImportCount > 0 ? "\(currentImportIndex)" : "0")
+                                    Text(progressPrimaryText)
                                         .font(.system(size: 13, weight: .semibold))
                                 }
 
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text(importPhaseTitle)
+                                    Text(compactQueueTitle)
                                         .font(.headline)
-                                    Text("Large import mode keeps the queue hidden until everything is ready.")
+                                    Text(compactQueueSubtitle)
                                         .font(.subheadline)
                                         .foregroundColor(.secondary)
                                 }
@@ -273,13 +314,35 @@ struct MusicView: View {
                                         .font(.subheadline.weight(.medium))
                                         .foregroundColor(.secondary)
                                     Spacer()
-                                    Text(totalImportCount > 0 ? "\(currentImportIndex)/\(totalImportCount)" : "0/0")
+                                    Text(progressCounterText)
                                         .font(.subheadline.weight(.medium))
                                         .foregroundColor(.secondary)
                                 }
 
-                                ProgressView(value: totalImportCount > 0 ? Double(currentImportIndex) / Double(totalImportCount) : 0)
+                                ProgressView(value: progressValue)
                                     .tint(.accentColor)
+                            }
+
+                            if shouldShowBatchMetadataEditorTrigger {
+                                Button {
+                                    showingBatchMetadataEditor = true
+                                } label: {
+                                    HStack(spacing: 10) {
+                                        Image(systemName: "slider.horizontal.3")
+                                            .font(.subheadline.weight(.semibold))
+                                        Text("Review Batch Metadata")
+                                            .font(.subheadline.weight(.semibold))
+                                        Spacer()
+                                        Text("\(songs.count)")
+                                            .font(.subheadline.weight(.medium))
+                                            .foregroundColor(.secondary)
+                                    }
+                                    .foregroundColor(.primary)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 12)
+                                    .background(Color(.systemGray6))
+                                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                                }
                             }
                         }
                         .padding(20)
@@ -388,6 +451,9 @@ struct MusicView: View {
             DocumentPicker(types: Self.supportedAudioTypes, allowsMultiple: true) { urls in
                 handleMusicImport(urls: urls)
             }
+        }
+        .sheet(isPresented: $showingBatchMetadataEditor) {
+            BatchMetadataEditorSheet(songs: $songs)
         }
         .sheet(item: $selectedSongForMatch) { item in
             if let index = songs.firstIndex(where: { $0.id == item.id }) {
@@ -655,7 +721,7 @@ struct MusicView: View {
                         song.lyrics = fetchedLyrics
                     }
                 }
-                
+
                 return song
             }
 
@@ -693,12 +759,12 @@ struct MusicView: View {
             switch stagedURLs.count {
             case 251...:
                 enrichmentConcurrency = 1
-            case 101...250:
+            case Self.largeBatchThreshold...250:
                 enrichmentConcurrency = 2
             default:
                 enrichmentConcurrency = 4
             }
-            shouldExtractArtworkDuringImport = stagedURLs.count <= 100
+            shouldExtractArtworkDuringImport = stagedURLs.count < Self.largeBatchThreshold
             Logger.shared.log("[MusicView] Staging completed. Staged \(stagedURLs.count) file(s), skipped \(skippedCount).")
             Logger.shared.log("[MusicView] Using enrichment concurrency: \(enrichmentConcurrency)")
             let importChunkSize = stagedURLs.count > 200 ? 100 : stagedURLs.count
@@ -821,13 +887,15 @@ struct MusicView: View {
         injectProgress = 0
         totalInjectCount = songs.count
         currentInjectIndex = 0
+        isMinimalBatchInjectionMode = songs.filter { SongMetadata.shouldPreserveLocalFile($0.localURL) }.count >= Self.largeBatchThreshold
         
         
-        manager.startHeartbeat { success in
+        manager.startHeartbeat(forceReconnect: true) { success in
             guard success else {
                 DispatchQueue.main.async {
                     self.showToast(title: "Connection Failed", icon: "exclamationmark.triangle.fill")
                     self.isInjecting = false
+                    self.isMinimalBatchInjectionMode = false
                 }
                 return
             }
@@ -859,9 +927,11 @@ struct MusicView: View {
                     
                     self.injectProgress = CGFloat(index) / CGFloat(self.totalInjectCount) * 0.9
                     
-                    while lastProcessedIndex < index && !self.songs.isEmpty {
-                        _ = self.songs.removeFirst()
-                        lastProcessedIndex += 1
+                    if !self.isMinimalBatchInjectionMode {
+                        while lastProcessedIndex < index && !self.songs.isEmpty {
+                            _ = self.songs.removeFirst()
+                            lastProcessedIndex += 1
+                        }
                     }
                 }
             }
@@ -875,6 +945,7 @@ struct MusicView: View {
                 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                     self.isInjecting = false
+                    self.isMinimalBatchInjectionMode = false
                     self.injectProgress = 0
                     
                     if success {
@@ -896,6 +967,72 @@ struct MusicView: View {
         }
 
     
+    }
+
+    private var progressCounterText: String {
+        if shouldHideQueueDuringLargeInjection {
+            return totalInjectCount > 0 ? "\(currentInjectIndex)/\(totalInjectCount)" : "0/0"
+        }
+        if shouldHideQueueDuringLargeImport {
+            return totalImportCount > 0 ? "\(currentImportIndex)/\(totalImportCount)" : "0/0"
+        }
+        if shouldUseCompactQueueForLargeBatch {
+            return "\(songs.count) queued"
+        }
+        return totalImportCount > 0 ? "\(currentImportIndex)/\(totalImportCount)" : "0/0"
+    }
+
+    private var progressValue: Double {
+        if shouldHideQueueDuringLargeInjection {
+            guard totalInjectCount > 0 else { return 0 }
+            return Double(currentInjectIndex) / Double(totalInjectCount)
+        }
+        if shouldHideQueueDuringLargeImport {
+            guard totalImportCount > 0 else { return 0 }
+            return Double(currentImportIndex) / Double(totalImportCount)
+        }
+        if shouldUseCompactQueueForLargeBatch {
+            return 1
+        }
+        guard totalImportCount > 0 else { return 0 }
+        return Double(currentImportIndex) / Double(totalImportCount)
+    }
+
+    private var progressRingValue: CGFloat {
+        CGFloat(min(max(progressValue, 0), 1))
+    }
+
+    private var progressPrimaryText: String {
+        if shouldHideQueueDuringLargeInjection {
+            return totalInjectCount > 0 ? "\(currentInjectIndex)" : "0"
+        }
+        if shouldHideQueueDuringLargeImport {
+            return totalImportCount > 0 ? "\(currentImportIndex)" : "0"
+        }
+        if shouldUseCompactQueueForLargeBatch {
+            return "\(songs.count)"
+        }
+        return "0"
+    }
+
+    private var compactQueueTitle: String {
+        if shouldHideQueueDuringLargeInjection {
+            return "Injecting Songs"
+        }
+        if shouldHideQueueDuringLargeImport {
+            return importPhaseTitle
+        }
+        return "Large Batch Ready"
+    }
+
+    private var compactQueueSubtitle: String {
+        if shouldHideQueueDuringLargeInjection {
+            return "Large batch mode keeps the queue lightweight while injection finishes."
+        }
+        if shouldHideQueueDuringLargeImport {
+            return "Large import mode keeps the queue hidden until everything is ready."
+        }
+        return "Use Review Batch Metadata to make edits before injecting."
     }
 
     private func showToast(title: String, icon: String) {
@@ -1275,14 +1412,18 @@ struct MusicView: View {
         
         isInjecting = true
         injectProgress = 0
+        totalInjectCount = songs.count
+        currentInjectIndex = 0
+        isMinimalBatchInjectionMode = songs.filter { SongMetadata.shouldPreserveLocalFile($0.localURL) }.count >= Self.largeBatchThreshold
 
         
         
-        manager.startHeartbeat { success in
+        manager.startHeartbeat(forceReconnect: true) { success in
             guard success else {
                 DispatchQueue.main.async {
                     self.showToast(title: "Connection Failed", icon: "exclamationmark.triangle.fill")
                     self.isInjecting = false
+                    self.isMinimalBatchInjectionMode = false
                 }
                 return
             }
@@ -1310,9 +1451,11 @@ struct MusicView: View {
                     self.currentInjectIndex = index
                     self.injectProgress = CGFloat(index) / CGFloat(self.totalInjectCount) * 0.9
                     
-                    while lastProcessedIndex < index && !self.songs.isEmpty {
-                        _ = self.songs.removeFirst()
-                        lastProcessedIndex += 1
+                    if !self.isMinimalBatchInjectionMode {
+                        while lastProcessedIndex < index && !self.songs.isEmpty {
+                            _ = self.songs.removeFirst()
+                            lastProcessedIndex += 1
+                        }
                     }
                 }
             }
@@ -1326,6 +1469,7 @@ struct MusicView: View {
                 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                     self.isInjecting = false
+                    self.isMinimalBatchInjectionMode = false
                     self.injectProgress = 0
                     
                     if success {
@@ -1344,6 +1488,158 @@ struct MusicView: View {
                     }
                 }
             }
+        }
+    }
+}
+
+private struct BatchMetadataEditorSheet: View {
+    @Binding var songs: [SongMetadata]
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var query = ""
+    @State private var selectedSong: SongMetadata?
+
+    private var filteredSongs: [SongMetadata] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return songs }
+        let needle = trimmed.lowercased()
+        return songs.filter {
+            $0.title.lowercased().contains(needle) ||
+            $0.artist.lowercased().contains(needle) ||
+            $0.album.lowercased().contains(needle)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                HStack(spacing: 12) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.secondary)
+                    TextField("Search imported songs", text: $query)
+                        .textInputAutocapitalization(.never)
+                        .disableAutocorrection(true)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .background(Color(.systemGray6))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(Array(filteredSongs.enumerated()), id: \.element.id) { index, song in
+                            HStack(spacing: 12) {
+                                artworkView(for: song)
+
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(song.title)
+                                        .font(.body.weight(.semibold))
+                                        .foregroundColor(.primary)
+                                        .lineLimit(1)
+                                    Text(song.artist)
+                                        .font(.subheadline)
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                    Text(song.album)
+                                        .font(.subheadline)
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                }
+
+                                Spacer(minLength: 12)
+
+                                Button {
+                                    selectedSong = song
+                                } label: {
+                                    Circle()
+                                        .fill(Color.accentColor.opacity(0.12))
+                                        .frame(width: 40, height: 40)
+                                        .overlay(
+                                            Image(systemName: "pencil")
+                                                .font(.system(size: 15, weight: .semibold))
+                                                .foregroundColor(.accentColor)
+                                        )
+                                }
+                                .buttonStyle(.plain)
+
+                                Button {
+                                    withAnimation(.easeOut(duration: 0.2)) {
+                                        songs.removeAll { $0.id == song.id }
+                                    }
+                                } label: {
+                                    Circle()
+                                        .fill(Color(.systemGray5))
+                                        .frame(width: 40, height: 40)
+                                        .overlay(
+                                            Image(systemName: "xmark")
+                                                .font(.system(size: 14, weight: .semibold))
+                                                .foregroundColor(.secondary)
+                                        )
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 12)
+
+                            if index < filteredSongs.count - 1 {
+                                Divider().padding(.leading, 88)
+                            }
+                        }
+                    }
+                    .padding(.top, 12)
+                    .padding(.bottom, 24)
+                }
+            }
+            .background(Color(.systemGroupedBackground))
+            .navigationTitle("Batch Editor")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    if !songs.isEmpty {
+                        Button("Clear All", role: .destructive) {
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                songs.removeAll()
+                            }
+                        }
+                    }
+                }
+            }
+            .sheet(item: $selectedSong) { item in
+                if let index = songs.firstIndex(where: { $0.id == item.id }) {
+                    ManualMetadataEditor(
+                        song: $songs[index],
+                        isPresented: Binding(
+                            get: { selectedSong != nil },
+                            set: { if !$0 { selectedSong = nil } }
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func artworkView(for song: SongMetadata) -> some View {
+        if let data = song.artworkPreviewData ?? song.artworkData,
+           let image = UIImage(data: data) {
+            Image(uiImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: 56, height: 56)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+        } else {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color(.systemGray5))
+                Image(systemName: "music.note")
+                    .foregroundColor(.secondary)
+            }
+            .frame(width: 56, height: 56)
         }
     }
 }

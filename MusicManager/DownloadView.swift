@@ -3,6 +3,7 @@ import Combine
 import UIKit
 import CryptoKit
 import AVFoundation
+import CommonCrypto
 
 struct DownloadView: View {
     private enum ResultsPage: String {
@@ -13,11 +14,12 @@ struct DownloadView: View {
 
     enum SearchProvider: String, CaseIterable, Identifiable {
         case appleMusic
+        case spotify
         case tidal
         case metadata
 
         static var allCases: [SearchProvider] {
-            [.appleMusic, .metadata]
+            [.appleMusic, .spotify, .metadata]
         }
 
         var id: String { rawValue }
@@ -25,6 +27,7 @@ struct DownloadView: View {
         var title: String {
             switch self {
             case .appleMusic: return "Apple Music"
+            case .spotify: return "Spotify"
             case .tidal: return "Tidal"
             case .metadata: return "iTunes + Deezer"
             }
@@ -32,7 +35,8 @@ struct DownloadView: View {
 
         var searchPlaceholder: String {
             switch self {
-            case .appleMusic: return "Search or paste a link from Apple Music"
+            case .appleMusic: return "Search or paste an Apple Music link"
+            case .spotify: return "Search or paste a Spotify link"
             case .tidal: return "Search Tidal songs"
             case .metadata: return "Search iTunes and Deezer"
             }
@@ -41,6 +45,7 @@ struct DownloadView: View {
         var emptyStateSubtitle: String {
             switch self {
             case .appleMusic: return "Search a song and tap download"
+            case .spotify: return "Search a song and tap download"
             case .tidal: return "Search Tidal and tap download"
             case .metadata: return "Search iTunes and Deezer and tap download"
             }
@@ -80,6 +85,15 @@ struct DownloadView: View {
     @State private var selectedTrackForBrowse: DownloadTrack?
     @State private var pushedArtist: DownloadArtist?
 
+    private var usesFloatingTabBarLayout: Bool {
+        let major = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+        return (16...18).contains(major)
+    }
+
+    private var resultsBottomInset: CGFloat {
+        usesFloatingTabBarLayout ? 110 : 24
+    }
+
     private var searchProvider: SearchProvider {
         get {
             guard let provider = SearchProvider(rawValue: searchProviderRaw) else {
@@ -97,17 +111,15 @@ struct DownloadView: View {
                     Text("Download")
                         .font(.system(size: 34, weight: .bold))
                     Spacer()
-                    if vm.shouldShowQueueIndicator {
-                        Button {
-                            showingQueueDetails = true
-                        } label: {
-                            DownloadQueueIndicator(
-                                progress: vm.currentSongProgress,
-                                label: vm.queueCounterText
-                            )
-                        }
-                        .buttonStyle(.plain)
+                    Button {
+                        showingQueueDetails = true
+                    } label: {
+                        DownloadQueueIndicator(
+                            progress: vm.currentSongProgress,
+                            label: vm.queueCounterText
+                        )
                     }
+                    .buttonStyle(.plain)
                 }
                 .padding(.top, 0)
                 .padding(.horizontal, 20)
@@ -240,6 +252,7 @@ struct DownloadView: View {
                                 }
                             }
                         }
+                        .padding(.bottom, resultsBottomInset)
                     }
                     .frame(maxHeight: .infinity)
                     .background(Color(.systemBackground))
@@ -267,6 +280,14 @@ struct DownloadView: View {
         .onAppear {
             if searchProviderRaw == SearchProvider.tidal.rawValue {
                 searchProviderRaw = SearchProvider.appleMusic.rawValue
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("IncomingMusicLink"))) { notification in
+            if let link = notification.object as? String {
+                self.query = link
+                Task {
+                    await vm.search(query: link, provider: searchProvider)
+                }
             }
         }
         .onChange(of: searchProviderRaw) { newValue in
@@ -1745,8 +1766,9 @@ enum DownloadDirectLinkPayload {
 
 struct BackendCandidate {
     let label: String
-    let request: URLRequest
+    let request: URLRequest?
     let tidalAPIBaseURL: String?
+    let customDownload: ((_ trackID: String, _ suggestedName: String, _ fallbackExtension: String) async throws -> URL)?
 }
 
 struct BackendDownloadOutcome {
@@ -1756,20 +1778,49 @@ struct BackendDownloadOutcome {
 
 enum DownloaderServerPreference: String, CaseIterable, Identifiable {
     case auto
+    case byeTunesAPI
     case yoinkify
     case qobuz
+    case appleMusicAPI
+    case deezerAPI
+    case tidalAPI
+    case pandoraAPI
+    case amazonAPI
+    case soundCloudAPI
+    case youtubeAPI
     case hifiOne
     case hifiTwo
+
+    static var allCases: [DownloaderServerPreference] {
+        [.byeTunesAPI, .deezerAPI]
+    }
 
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
         case .auto: return "Auto"
+        case .byeTunesAPI: return "ByeTunes API"
         case .yoinkify: return "Yoinkify"
         case .qobuz: return "Qobuz"
+        case .appleMusicAPI: return "Apple Music API"
+        case .deezerAPI: return "Deezer"
+        case .tidalAPI: return "Tidal API"
+        case .pandoraAPI: return "Pandora API"
+        case .amazonAPI: return "Amazon API"
+        case .soundCloudAPI: return "SoundCloud API"
+        case .youtubeAPI: return "YouTube API"
         case .hifiOne: return "HiFi One"
         case .hifiTwo: return "HiFi Two"
+        }
+    }
+
+    var isDirectProviderOnly: Bool {
+        switch self {
+        case .byeTunesAPI, .appleMusicAPI, .deezerAPI, .tidalAPI, .pandoraAPI, .amazonAPI, .soundCloudAPI, .youtubeAPI:
+            return true
+        case .auto, .yoinkify, .qobuz, .hifiOne, .hifiTwo:
+            return false
         }
     }
 }
@@ -1790,12 +1841,7 @@ private enum TidalAPIRegistry {
     static let gistURL = "https://gist.githubusercontent.com/afkarxyz/2ce772b943321b9448b454f39403ce25/raw"
     static let cacheKey = "rotatingTidalAPIBaseURLs"
     static let lastUsedKey = "rotatingTidalAPILastUsedURL"
-    static let defaultBaseURLs = [
-        "https://frankfurt-2.monochrome.tf",
-        "https://us-west.monochrome.tf",
-        "https://eu-central.monochrome.tf",
-        "https://monochrome-api.samidy.com"
-    ]
+    static let defaultBaseURLs: [String] = []
 }
 
 private enum QobuzAPIRegistry {
@@ -1805,8 +1851,7 @@ private enum QobuzAPIRegistry {
     ]
 
     static let downloadProviders: [(label: String, url: String)] = [
-        ("Qobuz API (Zarz)", "https://api.zarz.moe/dl/qbz"),
-        ("Qobuz API (MusicDL)", "https://dl.musicdl.me/qobuz/download")
+        ("Qobuz API (Zarz)", "https://api.zarz.moe/v1/dl/qbz")
     ]
 }
 
@@ -1821,6 +1866,10 @@ enum DownloadPlatform: String {
     case deezer
     case qobuz
     case tidal
+    case amazon
+    case pandora
+    case soundcloud
+    case youtubeMusic
     case unknown
 
     var displayName: String {
@@ -1830,6 +1879,10 @@ enum DownloadPlatform: String {
         case .deezer: return "Deezer"
         case .qobuz: return "Qobuz"
         case .tidal: return "Tidal"
+        case .amazon: return "Amazon Music"
+        case .pandora: return "Pandora"
+        case .soundcloud: return "SoundCloud"
+        case .youtubeMusic: return "YouTube Music"
         case .unknown: return "Unknown"
         }
     }
@@ -1841,6 +1894,10 @@ enum DownloadPlatform: String {
         case .deezer: return "itunes"
         case .qobuz: return "itunes"
         case .tidal: return "itunes"
+        case .amazon: return "itunes"
+        case .pandora: return "itunes"
+        case .soundcloud: return "itunes"
+        case .youtubeMusic: return "itunes"
         case .unknown: return "itunes"
         }
     }
@@ -1865,6 +1922,22 @@ private struct MetadataSearchBatch {
     let deezerCount: Int
 }
 
+private struct DeezerResolverCooldownPayload: Decodable {
+    let retry_after: Int?
+}
+
+private struct CachedDeezerDescriptor: Codable {
+    let downloadURL: String
+    let requiresClientDecryption: Bool
+    let fileFormat: String
+    let trackID: String?
+    let cachedAt: Date
+}
+
+private enum DeezerResolverPolicy {
+    static let maxAutomaticWaitSeconds = 210
+}
+
 private enum DirectLinkKind {
     case appleSong(id: String, sourceURL: String)
     case appleAlbum(id: String, sourceURL: String)
@@ -1874,6 +1947,10 @@ private enum DirectLinkKind {
     case tidalAlbum(id: String, sourceURL: String)
     case tidalArtist(id: String, sourceURL: String)
     case tidalPlaylist(id: String, sourceURL: String)
+    case spotifyTrack(id: String, sourceURL: String)
+    case spotifyAlbum(id: String, sourceURL: String)
+    case spotifyArtist(id: String, sourceURL: String)
+    case spotifyPlaylist(id: String, sourceURL: String)
 }
 
 enum DownloadError: LocalizedError {
@@ -1887,7 +1964,7 @@ enum DownloadError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .invalidURL(let value): return "Invalid URL: \(value)"
+        case .invalidURL: return "Invalid download URL."
         case .searchFailed: return "Search failed."
         case .mappingFailed(let message): return message
         case .remoteFailure(let text): return "Backend failure: \(text)"
@@ -1963,6 +2040,16 @@ final class DownloadViewModel: ObservableObject {
     @Published var albumResults: [DownloadAlbum] = []
     @Published var playlistResults: [DownloadAlbum] = []
     @Published var pendingDirectLinkAction: DownloadDirectLinkAction?
+    @Published var isPaused = false
+    private var queueTask: Task<Void, Never>?
+
+    var shouldShowPauseButton: Bool {
+        !pendingQueue.isEmpty || activeDownloadTrackID != nil
+    }
+
+    var shouldShowCancelButton: Bool {
+        !pendingQueue.isEmpty || activeDownloadTrackID != nil || isPaused
+    }
     @Published var isSearching = false
     @Published var errorText: String?
     @Published var canLoadMoreSongs = false
@@ -2011,6 +2098,10 @@ final class DownloadViewModel: ObservableObject {
     private var previewStatusObserver: NSKeyValueObservation?
     private var cachedPreviewURLs: [String: URL] = [:]
 
+    init() {
+        restorePersistedQueue()
+    }
+
     var queueProgress: Double {
         guard totalQueueCount > 0 else { return 0 }
         return Double(completedQueueCount) / Double(totalQueueCount)
@@ -2023,6 +2114,9 @@ final class DownloadViewModel: ObservableObject {
     }
 
     var queueStatusText: String {
+        if isPaused {
+            return "Paused"
+        }
         guard totalQueueCount > 0 else { return "Apple Music Search" }
         if let _ = activeDownloadTrackID, completedQueueCount < totalQueueCount {
             return "\(completedQueueCount + 1)/\(totalQueueCount)"
@@ -2031,10 +2125,13 @@ final class DownloadViewModel: ObservableObject {
     }
 
     var shouldShowQueueIndicator: Bool {
-        totalQueueCount > 0 && (activeDownloadTrackID != nil || !pendingQueue.isEmpty || completedQueueCount < totalQueueCount)
+        isPaused || (totalQueueCount > 0 && (activeDownloadTrackID != nil || !pendingQueue.isEmpty || completedQueueCount < totalQueueCount))
     }
 
     var queueCounterText: String {
+        if isPaused {
+            return "Paused"
+        }
         guard totalQueueCount > 0 else { return "0/0" }
         if activeDownloadTrackID != nil {
             return "\(min(completedQueueCount + 1, totalQueueCount))/\(totalQueueCount)"
@@ -2182,7 +2279,7 @@ final class DownloadViewModel: ObservableObject {
 
         let resolved: URL?
         switch track.provider {
-        case .appleMusic, .metadata, .tidal:
+        case .appleMusic, .spotify, .metadata, .tidal:
             resolved = await resolveITunesPreviewURL(for: track)
         }
 
@@ -2218,6 +2315,39 @@ final class DownloadViewModel: ObservableObject {
         return match?.previewUrl.flatMap(URL.init(string:))
     }
 
+    func pauseQueue() {
+        guard !isPaused else { return }
+        isPaused = true
+        queueTask?.cancel()
+        log("Download queue paused by user.")
+    }
+
+    func resumeQueue() {
+        guard isPaused else { return }
+        isPaused = false
+        log("Download queue resumed by user.")
+        queueTask = Task { await processQueueIfNeeded() }
+    }
+
+    func cancelQueue() {
+        queueTask?.cancel()
+        for track in pendingQueue {
+            trackStates[track.id] = .idle
+        }
+        pendingQueue.removeAll()
+        if let activeID = activeDownloadTrackID {
+            trackStates[activeID] = .idle
+        }
+        activeDownloadTrackID = nil
+        totalQueueCount = 0
+        completedQueueCount = 0
+        currentSongProgress = 0
+        currentDownloadSpeedBps = 0
+        isPaused = false
+        log("Download queue cancelled and cleared by user.")
+        syncQueuePersistence()
+    }
+
     func enqueue(track: DownloadTrack) {
         _ = enqueueMany([track])
     }
@@ -2238,7 +2368,33 @@ final class DownloadViewModel: ObservableObject {
         switch album.provider {
         case .appleMusic:
             let albumID = album.albumIdentifier ?? album.id
-            return await fetchAlbumTracks(albumID: albumID, fallbackAlbumName: album.name)
+            return await fetchAlbumTracks(albumID: albumID, fallbackAlbumName: album.name, sourceURL: album.sourceURL)
+        case .spotify:
+            if album.sourceURL.contains("spotify.com") {
+                if let (_, tracks) = await fetchSpotifyAlbum(id: album.id, sourceURL: album.sourceURL) {
+                    return tracks
+                }
+                return []
+            } else {
+                let albumID = album.albumIdentifier ?? album.id
+                let amTracks = await fetchAlbumTracks(albumID: albumID, fallbackAlbumName: album.name, sourceURL: album.sourceURL)
+                return amTracks.map { track in
+                    DownloadTrack(
+                        id: track.id,
+                        name: track.name,
+                        artistLine: track.artistLine,
+                        albumName: track.albumName,
+                        artworkURL: track.artworkURL,
+                        isExplicit: track.isExplicit,
+                        sourceURL: track.sourceURL,
+                        sourceContext: track.sourceContext,
+                        provider: .spotify,
+                        artistIdentifier: track.artistIdentifier,
+                        albumIdentifier: track.albumIdentifier,
+                        previewURL: track.previewURL
+                    )
+                }
+            }
         case .tidal:
             return await fetchTidalAlbumTracks(for: album)
         case .metadata:
@@ -2259,7 +2415,7 @@ final class DownloadViewModel: ObservableObject {
         switch playlist.provider {
         case .appleMusic:
             let playlistID = playlist.albumIdentifier ?? playlist.id
-            guard let playlistResult = await fetchAppleMusicPlaylist(id: playlistID) else { return [] }
+            guard let playlistResult = await fetchAppleMusicPlaylist(id: playlistID, sourceURL: playlist.sourceURL) else { return [] }
             return playlistResult.relationships?.tracks?.data.map {
                 DownloadTrack(
                     id: $0.id,
@@ -2276,6 +2432,33 @@ final class DownloadViewModel: ObservableObject {
                     previewURL: nil
                 )
             } ?? []
+        case .spotify:
+            if playlist.sourceURL.contains("spotify.com") {
+                if let (_, tracks) = await fetchSpotifyPlaylist(id: playlist.id, sourceURL: playlist.sourceURL) {
+                    return tracks
+                }
+                return []
+            } else {
+                let playlistID = playlist.albumIdentifier ?? playlist.id
+                guard let playlistResult = await fetchAppleMusicPlaylist(id: playlistID, sourceURL: playlist.sourceURL) else { return [] }
+                let region = UserDefaults.standard.string(forKey: "storeRegion")?.lowercased() ?? "us"
+                return playlistResult.relationships?.tracks?.data.map {
+                    DownloadTrack(
+                        id: $0.id,
+                        name: $0.attributes.name,
+                        artistLine: $0.attributes.artistName,
+                        albumName: $0.attributes.albumName ?? playlist.name,
+                        artworkURL: $0.attributes.artwork?.artworkURL(width: 400, height: 400) ?? playlist.artworkURL,
+                        isExplicit: $0.attributes.contentRating == "explicit",
+                        sourceURL: $0.attributes.url ?? playlist.sourceURL,
+                        sourceContext: .song,
+                        provider: .spotify,
+                        artistIdentifier: nil,
+                        albumIdentifier: nil,
+                        previewURL: nil
+                    )
+                } ?? []
+            }
         case .tidal, .metadata:
             return []
         }
@@ -2300,6 +2483,26 @@ final class DownloadViewModel: ObservableObject {
         guard let track = knownTracksByID[trackID] else { return }
         errorText = nil
         _ = enqueueMany([track])
+    }
+
+    func removeFailed(trackID: String) {
+        guard trackStates[trackID] == .failed else { return }
+        trackStates.removeValue(forKey: trackID)
+        queueOrder.removeAll { $0 == trackID }
+        if totalQueueCount > completedQueueCount {
+            totalQueueCount = max(0, totalQueueCount - 1)
+        }
+        syncQueuePersistence()
+    }
+
+    func removeQueued(trackID: String) {
+        guard trackStates[trackID] == .queued else { return }
+        pendingQueue.removeAll { $0.id == trackID }
+        trackStates.removeValue(forKey: trackID)
+        queueOrder.removeAll { $0 == trackID }
+        totalQueueCount = max(0, totalQueueCount - 1)
+        completedQueueCount = min(completedQueueCount, totalQueueCount)
+        syncQueuePersistence()
     }
 
     func retry(album: DownloadAlbum) async {
@@ -2342,6 +2545,119 @@ final class DownloadViewModel: ObservableObject {
         let added = enqueue(tracks: tracks, albumID: playlist.id)
         if added == 0 {
             errorText = "All tracks from \(playlist.name) are already queued or downloaded."
+        }
+    }
+
+    private func searchSpotify(query: String, limit: Int, offset: Int) async -> (songs: [DownloadTrack], albums: [DownloadAlbum], playlists: [DownloadAlbum])? {
+        guard let token = await fetchSpotifyToken() else { return nil }
+        
+        var components = URLComponents(string: "https://api.spotify.com/v1/search")!
+        components.queryItems = [
+            URLQueryItem(name: "q", value: query),
+            URLQueryItem(name: "type", value: "track,album,playlist"),
+            URLQueryItem(name: "limit", value: String(limit)),
+            URLQueryItem(name: "offset", value: String(offset))
+        ]
+        
+        guard let url = components.url else { return nil }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+            
+            var parsedTracks: [DownloadTrack] = []
+            var parsedAlbums: [DownloadAlbum] = []
+            var parsedPlaylists: [DownloadAlbum] = []
+            
+            if let tracksObj = json["tracks"] as? [String: Any],
+               let items = tracksObj["items"] as? [[String: Any]] {
+                for item in items {
+                    if let trackID = item["id"] as? String {
+                        let name = item["name"] as? String ?? "Unknown Title"
+                        let artists = item["artists"] as? [[String: Any]] ?? []
+                        let artistLine = artists.compactMap { $0["name"] as? String }.joined(separator: ", ")
+                        let explicit = item["explicit"] as? Bool ?? false
+                        let trackURL = "https://open.spotify.com/track/\(trackID)"
+                        
+                        let album = item["album"] as? [String: Any]
+                        let albumName = album?["name"] as? String ?? "Unknown Album"
+                        let artworkURLString = (album?["images"] as? [[String: Any]])?.first?["url"] as? String
+                        let artworkURL = artworkURLString.flatMap(URL.init(string:))
+                        
+                        parsedTracks.append(DownloadTrack(
+                            id: trackID,
+                            name: name,
+                            artistLine: artistLine.isEmpty ? "Unknown Artist" : artistLine,
+                            albumName: albumName,
+                            artworkURL: artworkURL,
+                            isExplicit: explicit,
+                            sourceURL: trackURL,
+                            sourceContext: .song,
+                            provider: .spotify,
+                            artistIdentifier: nil,
+                            albumIdentifier: album?["id"] as? String,
+                            previewURL: (item["preview_url"] as? String).flatMap(URL.init(string:))
+                        ))
+                    }
+                }
+            }
+            
+            if let albumsObj = json["albums"] as? [String: Any],
+               let items = albumsObj["items"] as? [[String: Any]] {
+                for item in items {
+                    if let albumID = item["id"] as? String {
+                        let name = item["name"] as? String ?? "Unknown Album"
+                        let artists = item["artists"] as? [[String: Any]] ?? []
+                        let artistLine = artists.compactMap { $0["name"] as? String }.joined(separator: ", ")
+                        let artworkURLString = (item["images"] as? [[String: Any]])?.first?["url"] as? String
+                        let artworkURL = artworkURLString.flatMap(URL.init(string:))
+                        let albumURL = "https://open.spotify.com/album/\(albumID)"
+                        
+                        parsedAlbums.append(DownloadAlbum(
+                            id: albumID,
+                            name: name,
+                            artistLine: artistLine.isEmpty ? "Unknown Artist" : artistLine,
+                            artworkURL: artworkURL,
+                            sourceURL: albumURL,
+                            provider: .spotify,
+                            artistIdentifier: nil,
+                            albumIdentifier: albumID
+                        ))
+                    }
+                }
+            }
+            
+            if let playlistsObj = json["playlists"] as? [String: Any],
+               let items = playlistsObj["items"] as? [[String: Any]] {
+                for item in items {
+                    if let playlistID = item["id"] as? String {
+                        let name = item["name"] as? String ?? "Unknown Playlist"
+                        let owner = (item["owner"] as? [String: Any])?["display_name"] as? String ?? "Spotify Playlist"
+                        let artworkURLString = (item["images"] as? [[String: Any]])?.first?["url"] as? String
+                        let artworkURL = artworkURLString.flatMap(URL.init(string:))
+                        let playlistURL = "https://open.spotify.com/playlist/\(playlistID)"
+                        
+                        parsedPlaylists.append(DownloadAlbum(
+                            id: playlistID,
+                            name: name,
+                            artistLine: owner,
+                            artworkURL: artworkURL,
+                            sourceURL: playlistURL,
+                            provider: .spotify,
+                            artistIdentifier: nil,
+                            albumIdentifier: playlistID
+                        ))
+                    }
+                }
+            }
+            
+            return (parsedTracks, parsedAlbums, parsedPlaylists)
+        } catch {
+            log("Spotify search failed: \(error.localizedDescription)")
+            return nil
         }
     }
 
@@ -2450,6 +2766,68 @@ final class DownloadViewModel: ObservableObject {
             canLoadMoreAlbums = albums.count == albumPageSize
             canLoadMorePlaylists = playlists.count == playlistPageSize
 
+        case .spotify:
+            artistResults = []
+            activeTidalSearchHost = nil
+            tidalCachedSearchArtists = []
+            tidalCachedSearchTracks = []
+            tidalCachedSearchAlbums = []
+            tidalSearchItemsCache = []
+            tidalTotalItemCount = 0
+
+            let songs = await AppleMusicAPI.shared.searchSongs(query: trimmed, limit: songPageSize, offset: 0)
+            let albums = await searchAlbums(query: trimmed, limit: albumPageSize, offset: 0)
+            let playlists = await searchPlaylists(query: trimmed, limit: playlistPageSize, offset: 0)
+            let region = UserDefaults.standard.string(forKey: "storeRegion")?.lowercased() ?? "us"
+
+            songResults = songs.map { item in
+                let songURL = item.attributes.url ?? "https://music.apple.com/\(region)/song/\(item.id)"
+                return DownloadTrack(
+                    id: item.id,
+                    name: item.attributes.name,
+                    artistLine: item.attributes.artistName,
+                    albumName: item.attributes.albumName ?? "Unknown Album",
+                    artworkURL: item.attributes.artwork?.artworkURL(width: 400, height: 400),
+                    isExplicit: item.attributes.contentRating == "explicit",
+                    sourceURL: songURL,
+                    sourceContext: .song,
+                    provider: .spotify,
+                    artistIdentifier: item.relationships?.artists?.data.first?.id,
+                    albumIdentifier: item.relationships?.albums?.data.first?.id,
+                    previewURL: nil
+                )
+            }
+
+            albumResults = albums.map { item in
+                let albumURL = "https://music.apple.com/\(region)/album/\(item.id)"
+                return DownloadAlbum(
+                    id: item.id,
+                    name: item.attributes.name,
+                    artistLine: item.attributes.artistName,
+                    artworkURL: item.attributes.artwork?.artworkURL(width: 400, height: 400),
+                    sourceURL: albumURL,
+                    provider: .spotify,
+                    artistIdentifier: nil,
+                    albumIdentifier: item.id
+                )
+            }
+            playlistResults = playlists.map { item in
+                let playlistURL = "https://music.apple.com/\(region)/playlist/\(item.id)"
+                return DownloadAlbum(
+                    id: item.id,
+                    name: item.attributes.name,
+                    artistLine: item.attributes.curatorName ?? "Apple Music Playlist",
+                    artworkURL: item.attributes.artwork?.artworkURL(width: 400, height: 400),
+                    sourceURL: playlistURL,
+                    provider: .spotify,
+                    artistIdentifier: nil,
+                    albumIdentifier: item.id
+                )
+            }
+            canLoadMoreSongs = songs.count == songPageSize
+            canLoadMoreAlbums = albums.count == albumPageSize
+            canLoadMorePlaylists = playlists.count == playlistPageSize
+
         case .tidal:
             activeTidalSearchHost = nil
             let response = await fetchPreferredTidalSearchResponse(query: trimmed, limit: songPageSize, offset: 0, logLabel: "search display")
@@ -2528,6 +2906,31 @@ final class DownloadViewModel: ObservableObject {
                 !songResults.contains(where: { $0.id == incoming.id })
             })
             canLoadMoreSongs = songs.count == songPageSize
+        case .spotify:
+            let offset = songResults.count
+            let songs = await AppleMusicAPI.shared.searchSongs(query: lastSearchQuery, limit: songPageSize, offset: offset)
+            let region = UserDefaults.standard.string(forKey: "storeRegion")?.lowercased() ?? "us"
+            let mappedSongs = songs.map { item in
+                let songURL = item.attributes.url ?? "https://music.apple.com/\(region)/song/\(item.id)"
+                return DownloadTrack(
+                    id: item.id,
+                    name: item.attributes.name,
+                    artistLine: item.attributes.artistName,
+                    albumName: item.attributes.albumName ?? "Unknown Album",
+                    artworkURL: item.attributes.artwork?.artworkURL(width: 400, height: 400),
+                    isExplicit: item.attributes.contentRating == "explicit",
+                    sourceURL: songURL,
+                    sourceContext: .song,
+                    provider: .spotify,
+                    artistIdentifier: item.relationships?.artists?.data.first?.id,
+                    albumIdentifier: item.relationships?.albums?.data.first?.id,
+                    previewURL: nil
+                )
+            }
+            songResults.append(contentsOf: mappedSongs.filter { incoming in
+                !songResults.contains(where: { $0.id == incoming.id })
+            })
+            canLoadMoreSongs = songs.count == songPageSize
         case .tidal:
             await expandTidalSearchCacheIfNeeded(minimumItemCount: songResults.count + songPageSize)
             tidalCachedSearchTracks = mapTidalSearchItemsToTracks(tidalSearchItemsCache)
@@ -2568,6 +2971,27 @@ final class DownloadViewModel: ObservableObject {
                     artworkURL: item.attributes.artwork?.artworkURL(width: 400, height: 400),
                     sourceURL: albumURL,
                     provider: .appleMusic,
+                    artistIdentifier: nil,
+                    albumIdentifier: item.id
+                )
+            }
+            albumResults.append(contentsOf: mappedAlbums.filter { incoming in
+                !albumResults.contains(where: { $0.id == incoming.id })
+            })
+            canLoadMoreAlbums = albums.count == albumPageSize
+        case .spotify:
+            let offset = albumResults.count
+            let albums = await searchAlbums(query: lastSearchQuery, limit: albumPageSize, offset: offset)
+            let region = UserDefaults.standard.string(forKey: "storeRegion")?.lowercased() ?? "us"
+            let mappedAlbums = albums.map { item in
+                let albumURL = "https://music.apple.com/\(region)/album/\(item.id)"
+                return DownloadAlbum(
+                    id: item.id,
+                    name: item.attributes.name,
+                    artistLine: item.attributes.artistName,
+                    artworkURL: item.attributes.artwork?.artworkURL(width: 400, height: 400),
+                    sourceURL: albumURL,
+                    provider: .spotify,
                     artistIdentifier: nil,
                     albumIdentifier: item.id
                 )
@@ -2626,6 +3050,26 @@ final class DownloadViewModel: ObservableObject {
                 !playlistResults.contains(where: { $0.id == incoming.id })
             })
             canLoadMorePlaylists = playlists.count == playlistPageSize
+        case .spotify:
+            let offset = playlistResults.count
+            let playlists = await searchPlaylists(query: lastSearchQuery, limit: playlistPageSize, offset: offset)
+            let region = UserDefaults.standard.string(forKey: "storeRegion")?.lowercased() ?? "us"
+            let mappedPlaylists = playlists.map { item in
+                DownloadAlbum(
+                    id: item.id,
+                    name: item.attributes.name,
+                    artistLine: item.attributes.curatorName ?? "Apple Music Playlist",
+                    artworkURL: item.attributes.artwork?.artworkURL(width: 400, height: 400),
+                    sourceURL: "https://music.apple.com/\(region)/playlist/\(item.id)",
+                    provider: .spotify,
+                    artistIdentifier: nil,
+                    albumIdentifier: item.id
+                )
+            }
+            playlistResults.append(contentsOf: mappedPlaylists.filter { incoming in
+                !playlistResults.contains(where: { $0.id == incoming.id })
+            })
+            canLoadMorePlaylists = playlists.count == playlistPageSize
         case .tidal, .metadata:
             canLoadMorePlaylists = false
         }
@@ -2670,9 +3114,7 @@ final class DownloadViewModel: ObservableObject {
 
             return DownloadArtistProfile(tracks: tracks, albums: uniqueAlbums(mappedAlbums))
 
-        case .tidal:
-            return await buildMetadataArtistProfile(for: artist.name)
-        case .metadata:
+        case .tidal, .metadata, .spotify:
             return await buildMetadataArtistProfile(for: artist.name)
         }
     }
@@ -2703,7 +3145,7 @@ final class DownloadViewModel: ObservableObject {
 
         switch link {
         case .appleSong(let id, let sourceURL):
-            guard let song = await AppleMusicAPI.shared.fetchSong(id: id) else {
+            guard let song = await AppleMusicAPI.shared.fetchSong(id: id, urlHint: sourceURL) else {
                 errorText = "Could not load that Apple Music song link."
                 return true
             }
@@ -2712,12 +3154,12 @@ final class DownloadViewModel: ObservableObject {
             return true
 
         case .appleAlbum(let id, let sourceURL):
-            guard let album = await fetchAppleMusicAlbum(id: id) else {
+            guard let album = await fetchAppleMusicAlbum(id: id, sourceURL: sourceURL) else {
                 errorText = "Could not load that Apple Music album link."
                 return true
             }
             let albumResult = makeAppleMusicAlbum(from: album, sourceURLOverride: sourceURL)
-            let tracks = await fetchAlbumTracks(albumID: id, fallbackAlbumName: album.attributes?.name ?? "Unknown Album")
+            let tracks = await fetchAlbumTracks(albumID: id, fallbackAlbumName: album.attributes?.name ?? "Unknown Album", sourceURL: sourceURL)
             albumTrackIDs[albumResult.id] = tracks.map(\.id)
             pendingDirectLinkAction = DownloadDirectLinkAction(
                 payload: .collection(
@@ -2729,8 +3171,8 @@ final class DownloadViewModel: ObservableObject {
             )
             return true
 
-        case .appleArtist(let id, _):
-            guard let artistData = await fetchAppleMusicArtist(id: id) else {
+        case .appleArtist(let id, let sourceURL):
+            guard let artistData = await fetchAppleMusicArtist(id: id, sourceURL: sourceURL) else {
                 errorText = "Could not load that Apple Music artist link."
                 return true
             }
@@ -2744,7 +3186,7 @@ final class DownloadViewModel: ObservableObject {
             return true
 
         case .applePlaylist(let id, let sourceURL):
-            guard let playlist = await fetchAppleMusicPlaylist(id: id) else {
+            guard let playlist = await fetchAppleMusicPlaylist(id: id, sourceURL: sourceURL) else {
                 errorText = "Could not load that Apple Music playlist link."
                 return true
             }
@@ -2839,6 +3281,54 @@ final class DownloadViewModel: ObservableObject {
             }
             errorText = "Tidal playlist links are not supported by the current backends."
             return true
+
+        case .spotifyTrack(let id, let sourceURL):
+            guard let track = await fetchSpotifyTrack(id: id, sourceURL: sourceURL) else {
+                errorText = "Could not load that Spotify track link."
+                return true
+            }
+            pendingDirectLinkAction = DownloadDirectLinkAction(payload: .track(track))
+            return true
+
+        case .spotifyAlbum(let id, let sourceURL):
+            guard let (albumResult, tracks) = await fetchSpotifyAlbum(id: id, sourceURL: sourceURL) else {
+                errorText = "Could not load that Spotify album link."
+                return true
+            }
+            albumTrackIDs[albumResult.id] = tracks.map(\.id)
+            pendingDirectLinkAction = DownloadDirectLinkAction(
+                payload: .collection(
+                    album: albumResult,
+                    tracks: tracks,
+                    title: "Album Download",
+                    helperText: "Choose the tracks you want to download, or grab the full album in one tap."
+                )
+            )
+            return true
+
+        case .spotifyArtist(let id, let sourceURL):
+            guard let artist = await fetchSpotifyArtist(id: id, sourceURL: sourceURL) else {
+                errorText = "Could not load that Spotify artist link."
+                return true
+            }
+            pendingDirectLinkAction = DownloadDirectLinkAction(payload: .artist(artist))
+            return true
+
+        case .spotifyPlaylist(let id, let sourceURL):
+            guard let (playlistContainer, tracks) = await fetchSpotifyPlaylist(id: id, sourceURL: sourceURL) else {
+                errorText = "Could not load that Spotify playlist link."
+                return true
+            }
+            albumTrackIDs[playlistContainer.id] = tracks.map(\.id)
+            pendingDirectLinkAction = DownloadDirectLinkAction(
+                payload: .collection(
+                    album: playlistContainer,
+                    tracks: tracks,
+                    title: "Playlist Download",
+                    helperText: "Choose the songs you want to download, or grab the full playlist in one tap."
+                )
+            )
+            return true
         }
     }
 
@@ -2881,6 +3371,30 @@ final class DownloadViewModel: ObservableObject {
                let id = pathParts.dropFirst(index + 1).last,
                !id.isEmpty {
                 return .applePlaylist(id: id, sourceURL: sourceURL)
+            }
+        } else if host.contains("spotify.com") {
+            if let index = pathParts.firstIndex(of: "track"),
+               let id = pathParts.dropFirst(index + 1).first,
+               !id.isEmpty {
+                return .spotifyTrack(id: id, sourceURL: sourceURL)
+            }
+
+            if let index = pathParts.firstIndex(of: "album"),
+               let id = pathParts.dropFirst(index + 1).first,
+               !id.isEmpty {
+                return .spotifyAlbum(id: id, sourceURL: sourceURL)
+            }
+
+            if let index = pathParts.firstIndex(of: "artist"),
+               let id = pathParts.dropFirst(index + 1).first,
+               !id.isEmpty {
+                return .spotifyArtist(id: id, sourceURL: sourceURL)
+            }
+
+            if let index = pathParts.firstIndex(of: "playlist"),
+               let id = pathParts.dropFirst(index + 1).first,
+               !id.isEmpty {
+                return .spotifyPlaylist(id: id, sourceURL: sourceURL)
             }
         }
 
@@ -3043,80 +3557,69 @@ final class DownloadViewModel: ObservableObject {
         return collected
     }
 
-    private func fetchAppleMusicAlbum(id: String) async -> AppleMusicAlbumDetailsData? {
-        guard let token = await AppleMusicAPI.shared.getToken() else { return nil }
-
-        let region = UserDefaults.standard.string(forKey: "storeRegion")?.lowercased() ?? "us"
-        guard var components = URLComponents(string: "https://amp-api.music.apple.com/v1/catalog/\(region)/albums/\(id)") else {
+    private func fetchAppleMusicAlbum(id: String, sourceURL: String? = nil) async -> AppleMusicAlbumDetailsData? {
+        guard let fallbackAlbum = await AppleMusicAPI.shared.fetchAlbumPublic(id: id, urlHint: sourceURL) else {
             return nil
         }
-        components.queryItems = [
-            URLQueryItem(name: "include", value: "tracks"),
-            URLQueryItem(name: "limit[tracks]", value: "200")
-        ]
-        guard let url = components.url else { return nil }
 
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("https://music.apple.com", forHTTPHeaderField: "Origin")
-
-        do {
-            let (data, _) = try await session.data(for: request)
-            let decoded = try JSONDecoder().decode(AppleMusicAlbumDetailsResponse.self, from: data)
-            return decoded.data.first
-        } catch {
-            log("Apple Music album fetch failed for \(id): \(error.localizedDescription)")
-            return nil
-        }
+        let fallbackTracks = await AppleMusicAPI.shared.fetchAlbumTracksPublic(id: id, urlHint: sourceURL)
+        return AppleMusicAlbumDetailsData(
+            id: fallbackAlbum.id,
+            attributes: AppleMusicDirectAlbumAttributes(
+                name: fallbackAlbum.name,
+                artistName: fallbackAlbum.artistName,
+                artwork: fallbackAlbum.artwork,
+                playParams: AppleMusicPlayParams(id: fallbackAlbum.id)
+            ),
+            relationships: AppleMusicAlbumRelationships(
+                tracks: AppleMusicAlbumTracksPage(data: fallbackTracks.map {
+                    AppleMusicAlbumTrack(
+                        id: $0.id,
+                        attributes: AppleMusicAlbumTrackAttributes(
+                            name: $0.attributes.name,
+                            artistName: $0.attributes.artistName,
+                            albumName: $0.attributes.albumName,
+                            url: $0.attributes.url,
+                            contentRating: $0.attributes.contentRating,
+                            artwork: $0.attributes.artwork
+                        )
+                    )
+                })
+            )
+        )
     }
 
-    private func fetchAppleMusicArtist(id: String) async -> AppleMusicArtistResult? {
-        guard let token = await AppleMusicAPI.shared.getToken() else { return nil }
-
-        let region = UserDefaults.standard.string(forKey: "storeRegion")?.lowercased() ?? "us"
-        guard let url = URL(string: "https://amp-api.music.apple.com/v1/catalog/\(region)/artists/\(id)") else {
+    private func fetchAppleMusicArtist(id: String, sourceURL: String? = nil) async -> AppleMusicArtistResult? {
+        guard let fallbackArtist = await AppleMusicAPI.shared.fetchArtistPublic(id: id, urlHint: sourceURL) else {
             return nil
         }
 
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("https://music.apple.com", forHTTPHeaderField: "Origin")
-
-        do {
-            let (data, _) = try await session.data(for: request)
-            let decoded = try JSONDecoder().decode(AppleMusicArtistResponse.self, from: data)
-            return decoded.data.first
-        } catch {
-            log("Apple Music artist fetch failed for \(id): \(error.localizedDescription)")
-            return nil
-        }
+        return AppleMusicArtistResult(
+            id: fallbackArtist.id,
+            attributes: AppleMusicArtistAttributes(
+                name: fallbackArtist.name,
+                artwork: fallbackArtist.artwork
+            )
+        )
     }
 
-    private func fetchAppleMusicPlaylist(id: String) async -> AppleMusicPlaylistResult? {
-        guard let token = await AppleMusicAPI.shared.getToken() else { return nil }
-
-        let region = UserDefaults.standard.string(forKey: "storeRegion")?.lowercased() ?? "us"
-        guard var components = URLComponents(string: "https://amp-api.music.apple.com/v1/catalog/\(region)/playlists/\(id)") else {
+    private func fetchAppleMusicPlaylist(id: String, sourceURL: String? = nil) async -> AppleMusicPlaylistResult? {
+        guard let fallbackPlaylist = await AppleMusicAPI.shared.fetchPlaylistPublic(id: id, urlHint: sourceURL) else {
             return nil
         }
-        components.queryItems = [
-            URLQueryItem(name: "include", value: "tracks"),
-            URLQueryItem(name: "limit[tracks]", value: "200")
-        ]
-        guard let url = components.url else { return nil }
 
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("https://music.apple.com", forHTTPHeaderField: "Origin")
-
-        do {
-            let (data, _) = try await session.data(for: request)
-            let decoded = try JSONDecoder().decode(AppleMusicPlaylistResponse.self, from: data)
-            return decoded.data.first
-        } catch {
-            log("Apple Music playlist fetch failed for \(id): \(error.localizedDescription)")
-            return nil
-        }
+        let fallbackTracks = await AppleMusicAPI.shared.fetchPlaylistTracksPublic(id: id, urlHint: sourceURL)
+        return AppleMusicPlaylistResult(
+            id: fallbackPlaylist.id,
+            attributes: AppleMusicPlaylistAttributes(
+                name: fallbackPlaylist.name,
+                curatorName: fallbackPlaylist.curatorName,
+                artwork: fallbackPlaylist.artwork
+            ),
+            relationships: AppleMusicPlaylistRelationships(
+                tracks: AppleMusicPlaylistTracksPage(data: fallbackTracks)
+            )
+        )
     }
 
     private func fetchMetadataSearchTracks(
@@ -3203,6 +3706,7 @@ final class DownloadViewModel: ObservableObject {
     }
 
     private func processQueueIfNeeded() async {
+        guard !isPaused else { return }
         guard !isProcessingQueue else { return }
         isProcessingQueue = true
         beginBackgroundTaskIfNeeded()
@@ -3212,12 +3716,16 @@ final class DownloadViewModel: ObservableObject {
         }
 
         while !pendingQueue.isEmpty {
+            if Task.isCancelled || isPaused {
+                break
+            }
             let track = pendingQueue.removeFirst()
             errorText = nil
             activeDownloadTrackID = track.id
             trackStates[track.id] = .downloading
             currentSongProgress = 0
             currentDownloadSpeedBps = 0
+            syncQueuePersistence()
 
             do {
                 let outcome = try await downloadWithFallbacks(track: track)
@@ -3229,6 +3737,14 @@ final class DownloadViewModel: ObservableObject {
                 emittedSongs.append(song)
                 trackStates[track.id] = .done
             } catch {
+                if Task.isCancelled {
+                    log("Download cancelled/paused by user.")
+                    trackStates[track.id] = .idle
+                    if isPaused {
+                        pendingQueue.insert(track, at: 0)
+                    }
+                    break
+                }
                 let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 log("Download failed: \(message)")
                 errorText = message
@@ -3239,6 +3755,7 @@ final class DownloadViewModel: ObservableObject {
             activeDownloadTrackID = nil
             currentSongProgress = 0
             currentDownloadSpeedBps = 0
+            syncQueuePersistence()
         }
     }
 
@@ -3262,14 +3779,17 @@ final class DownloadViewModel: ObservableObject {
             totalQueueCount += 1
         }
 
-        Task { await processQueueIfNeeded() }
+        syncQueuePersistence()
+        if !isPaused {
+            queueTask = Task { await processQueueIfNeeded() }
+        }
         return validTracks.count
     }
 
     private func enrichDownloadedSong(_ initialSong: SongMetadata, sourceTrack: DownloadTrack) async -> SongMetadata {
         var song = initialSong
 
-        song = await SongMetadata.enrichWithExactAppleMusicTrack(song, trackID: sourceTrack.id)
+        song = await SongMetadata.enrichWithExactAppleMusicTrack(song, trackID: sourceTrack.id, urlHint: sourceTrack.sourceURL)
 
         if song.storeId == 0 {
             song = await SongMetadata.enrichWithAppleMusicMetadata(song)
@@ -3295,19 +3815,33 @@ final class DownloadViewModel: ObservableObject {
         sourceTrack: DownloadTrack,
         backendLabel: String
     ) async throws {
-        guard backendLabel.localizedCaseInsensitiveContains("am-dl") else { return }
+        let isAMDL = backendLabel.localizedCaseInsensitiveContains("am-dl")
+        let isQobuz = backendLabel.localizedCaseInsensitiveContains("qobuz")
+        guard isAMDL || isQobuz else { return }
 
         if song.fileSize < 32_768 {
-            log("AM-DL validation failed for \(sourceTrack.id): file too small (\(song.fileSize) bytes)")
-            throw DownloadError.remoteFailure("AM-DL did not return a full audio file.")
+            log("\(backendLabel) validation failed for \(sourceTrack.id): file too small (\(song.fileSize) bytes)")
+            throw DownloadError.remoteFailure("\(backendLabel) did not return a full audio file.")
         }
+
+        if !downloadedFileLooksLikeAudio(song.localURL) {
+            log("\(backendLabel) validation failed for \(sourceTrack.id): file signature does not match audio type at \(song.localURL.lastPathComponent)")
+            throw DownloadError.remoteFailure("\(backendLabel) returned an invalid audio file.")
+        }
+
+        if !downloadedFileCanBeDecoded(song.localURL) {
+            log("\(backendLabel) validation failed for \(sourceTrack.id): audio is not decodable at \(song.localURL.lastPathComponent) (\(song.fileSize) bytes)")
+            throw DownloadError.remoteFailure("\(backendLabel) returned unreadable audio data.")
+        }
+
+        guard isAMDL else { return }
 
         if song.durationMs <= 0 {
             log("AM-DL validation failed for \(sourceTrack.id): unreadable duration (\(song.durationMs) ms)")
             throw DownloadError.remoteFailure("AM-DL returned an unreadable audio file.")
         }
 
-        if let expectedSong = await AppleMusicAPI.shared.fetchSong(id: sourceTrack.id),
+        if let expectedSong = await AppleMusicAPI.shared.fetchSong(id: sourceTrack.id, urlHint: sourceTrack.sourceURL),
            let expectedDurationMs = expectedSong.attributes.durationInMillis,
            expectedDurationMs > 0 {
             let deltaMs = abs(song.durationMs - expectedDurationMs)
@@ -3316,6 +3850,63 @@ final class DownloadViewModel: ObservableObject {
                 log("AM-DL validation failed for \(sourceTrack.id): duration mismatch actual=\(song.durationMs) expected=\(expectedDurationMs) delta=\(deltaMs)")
                 throw DownloadError.remoteFailure("AM-DL returned media that does not match the expected song duration.")
             }
+        }
+    }
+
+    private func downloadedFileLooksLikeAudio(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+
+        let header = (try? handle.read(upToCount: 32)) ?? Data()
+        guard !header.isEmpty else { return false }
+
+        let ext = url.pathExtension.lowercased()
+        switch ext {
+        case "flac":
+            return header.count >= 4 && String(data: header.prefix(4), encoding: .ascii) == "fLaC"
+        case "mp3":
+            if header.count >= 3 && String(data: header.prefix(3), encoding: .ascii) == "ID3" {
+                return true
+            }
+            guard header.count >= 2 else { return false }
+            return header[0] == 0xFF && (header[1] & 0xE0) == 0xE0
+        case "m4a", "mp4", "aac", "alac":
+            guard header.count >= 12 else { return false }
+            return String(data: header[4..<8], encoding: .ascii) == "ftyp"
+        case "wav", "wave":
+            guard header.count >= 12 else { return false }
+            return String(data: header.prefix(4), encoding: .ascii) == "RIFF" &&
+                String(data: header[8..<12], encoding: .ascii) == "WAVE"
+        default:
+            if header.count >= 4 && String(data: header.prefix(4), encoding: .ascii) == "fLaC" {
+                return true
+            }
+            if header.count >= 3 && String(data: header.prefix(3), encoding: .ascii) == "ID3" {
+                return true
+            }
+            if header.count >= 12 &&
+                String(data: header[4..<8], encoding: .ascii) == "ftyp" {
+                return true
+            }
+            if header.count >= 12 &&
+                String(data: header.prefix(4), encoding: .ascii) == "RIFF" &&
+                String(data: header[8..<12], encoding: .ascii) == "WAVE" {
+                return true
+            }
+            if header.count >= 2 && header[0] == 0xFF && (header[1] & 0xE0) == 0xE0 {
+                return true
+            }
+            return false
+        }
+    }
+
+    private func downloadedFileCanBeDecoded(_ url: URL) -> Bool {
+        do {
+            let audioFile = try AVAudioFile(forReading: url)
+            return audioFile.length > 0 && audioFile.processingFormat.sampleRate > 0
+        } catch {
+            log("Download decode probe failed for \(url.lastPathComponent): \(error.localizedDescription)")
+            return false
         }
     }
 
@@ -3334,128 +3925,48 @@ final class DownloadViewModel: ObservableObject {
     }
 
     private func downloadWithFallbacks(track: DownloadTrack) async throws -> BackendDownloadOutcome {
-        let serverPreference = DownloaderServerPreference(rawValue: UserDefaults.standard.string(forKey: "downloadServer") ?? "") ?? .auto
+        let serverPreference: DownloaderServerPreference = .auto
         let resolvedSource = await resolvedPrimaryDownloadSource(for: track, serverPreference: serverPreference)
-        log("Using primary source URL (\(resolvedSource.platform.displayName)): \(resolvedSource.url)")
+        log("Using source URL (\(resolvedSource.platform.displayName)): \(resolvedSource.url)")
 
-        if serverPreference == .auto || serverPreference == .yoinkify {
-            let primaryCandidates = try await primaryCandidates(for: resolvedSource, serverPreference: serverPreference)
+        let candidates = try await primaryCandidates(for: resolvedSource, serverPreference: serverPreference, track: track)
+        if !candidates.isEmpty {
+            if let outcome = try await executeCandidatesUntilSuccess(
+                candidates,
+                trackID: track.id,
+                suggestedName: "\(track.artistLine) - \(track.name)",
+                fallbackExtension: "flac"
+            ) {
+                return outcome
+            }
+        }
+
+        // Last resort: If the current source is not Spotify, try mapping to Spotify and using the ByeTunes API with it.
+        if resolvedSource.platform != .spotify {
+            log("Attempting last-resort Spotify mapping for \(track.name)...")
             do {
-                if let outcome = try await executeCandidatesUntilSuccess(
-                    primaryCandidates,
-                    trackID: track.id,
-                    suggestedName: "\(track.artistLine) - \(track.name)",
-                    fallbackExtension: "flac"
-                ) {
-                    return outcome
-                }
-            } catch {
-                log("Primary backend chain exhausted: \(error.localizedDescription)")
-                if serverPreference == .yoinkify {
-                    throw error
-                }
-            }
-        }
-
-        if serverPreference == .auto || serverPreference == .qobuz {
-            log(serverPreference == .auto ? "Yoinkify failed. Preparing Qobuz fallback backends." : "Preparing Qobuz backend.")
-
-            let qobuzTrackIDs = await resolveQobuzFallbackTrackIDs(for: track)
-            if !qobuzTrackIDs.isEmpty {
-                for (index, candidateTrackID) in qobuzTrackIDs.enumerated() {
-                    if index == 0 {
-                        log("Trying primary Qobuz fallback candidate: \(candidateTrackID)")
-                    } else {
-                        log("Trying second-stage Qobuz candidate: \(candidateTrackID)")
-                    }
-                    do {
-                        let candidates = try await qobuzCandidates(trackID: candidateTrackID)
-                        if let outcome = try await executeCandidatesUntilSuccess(
-                            candidates,
-                            trackID: track.id,
-                            suggestedName: "\(track.artistLine) - \(track.name)",
-                            fallbackExtension: "flac"
-                        ) {
-                            return outcome
-                        }
-                    } catch {
-                        log("Qobuz candidate \(candidateTrackID) failed: \(error.localizedDescription)")
-                    }
-                }
-            } else {
-                log("Qobuz fallback could not find a strong match for \(track.name).")
-            }
-        }
-
-        if serverPreference == .qobuz {
-            let yoinkifyRescueSource = await resolvedPrimaryDownloadSource(for: track, serverPreference: .yoinkify)
-            if yoinkifyRescueSource.platform != .tidal && yoinkifyRescueSource.platform != .qobuz {
-                log("Qobuz backend failed. Trying Yoinkify rescue path.")
-                let rescueCandidates = try await primaryCandidates(for: yoinkifyRescueSource, serverPreference: .yoinkify)
-                do {
+                let seed = mappingSeedURL(for: track.sourceURL)
+                let spotifyURL = try await fetchMappedURL(for: seed, platform: .spotify)
+                log("Mapped to Spotify for last-resort retry: \(spotifyURL)")
+                
+                let spotifySource = DownloadSourceChoice(
+                    platform: .spotify,
+                    url: spotifyURL,
+                    backendGenreSource: DownloadPlatform.spotify.backendGenreSource
+                )
+                let spotifyCandidates = try await primaryCandidates(for: spotifySource, serverPreference: serverPreference, track: track)
+                if !spotifyCandidates.isEmpty {
                     if let outcome = try await executeCandidatesUntilSuccess(
-                        rescueCandidates,
+                        spotifyCandidates,
                         trackID: track.id,
                         suggestedName: "\(track.artistLine) - \(track.name)",
                         fallbackExtension: "flac"
                     ) {
                         return outcome
                     }
-                } catch {
-                    log("Yoinkify rescue path failed: \(error.localizedDescription)")
-                }
-            }
-
-            throw DownloadError.mappingFailed("All configured Qobuz backends failed.")
-        }
-
-        log(serverPreference == .auto ? "Qobuz failed. Preparing Tidal fallback backends." : "Preparing \(serverPreference.displayName) backend.")
-
-        let candidateTrackIDs = await resolveTidalFallbackTrackIDs(for: track)
-        guard !candidateTrackIDs.isEmpty else {
-            throw DownloadError.mappingFailed("Song.link could not map the track, and no strong Tidal fallback match was found.")
-        }
-
-        for (index, candidateTrackID) in candidateTrackIDs.enumerated() {
-            if index == 0 {
-                log("Trying primary Tidal fallback candidate: \(candidateTrackID)")
-            } else {
-                log("Trying second-stage Tidal candidate: \(candidateTrackID)")
-            }
-            do {
-                let tidalCandidates = await (serverPreference == .auto
-                    ? tidalCandidates(trackID: candidateTrackID)
-                    : tidalCandidates(trackID: candidateTrackID, preference: serverPreference))
-                if let outcome = try await executeCandidatesUntilSuccess(
-                    tidalCandidates,
-                    trackID: track.id,
-                    suggestedName: "\(track.artistLine) - \(track.name)",
-                    fallbackExtension: "flac"
-                ) {
-                    return outcome
                 }
             } catch {
-                log("Second-stage Tidal candidate \(candidateTrackID) failed: \(error.localizedDescription)")
-            }
-        }
-
-        if serverPreference == .hifiOne || serverPreference == .hifiTwo {
-            let yoinkifyRescueSource = await resolvedPrimaryDownloadSource(for: track, serverPreference: .yoinkify)
-            if yoinkifyRescueSource.platform != .tidal {
-                log("Tidal backends failed. Trying Yoinkify rescue path.")
-                let rescueCandidates = try await primaryCandidates(for: yoinkifyRescueSource, serverPreference: .yoinkify)
-                do {
-                    if let outcome = try await executeCandidatesUntilSuccess(
-                        rescueCandidates,
-                        trackID: track.id,
-                        suggestedName: "\(track.artistLine) - \(track.name)",
-                        fallbackExtension: "flac"
-                    ) {
-                        return outcome
-                    }
-                } catch {
-                    log("Yoinkify rescue path failed: \(error.localizedDescription)")
-                }
+                log("Last-resort Spotify mapping failed: \(error.localizedDescription)")
             }
         }
 
@@ -3474,6 +3985,14 @@ final class DownloadViewModel: ObservableObject {
             platform = .qobuz
         } else if sourceURL.contains("tidal.com") {
             platform = .tidal
+        } else if sourceURL.contains("music.amazon.") || sourceURL.contains("amazon.com/music") || sourceURL.contains("amazon.com/gp/product/") {
+            platform = .amazon
+        } else if sourceURL.contains("pandora.com") {
+            platform = .pandora
+        } else if sourceURL.contains("soundcloud.com") {
+            platform = .soundcloud
+        } else if sourceURL.contains("music.youtube.com") || sourceURL.contains("youtube.com") || sourceURL.contains("youtu.be") {
+            platform = .youtubeMusic
         } else {
             platform = .unknown
         }
@@ -3484,52 +4003,782 @@ final class DownloadViewModel: ObservableObject {
         for track: DownloadTrack,
         serverPreference: DownloaderServerPreference
     ) async -> DownloadSourceChoice {
-        let source = preferredDownloadSource(for: track.sourceURL)
-        guard serverPreference == .auto || serverPreference == .yoinkify else {
+        var source = preferredDownloadSource(for: track.sourceURL)
+        if track.provider == .spotify && source.platform == .appleMusic {
+            do {
+                let seed = mappingSeedURL(for: track.sourceURL)
+                let mappedURL = try await fetchMappedURL(for: seed, platform: .spotify)
+                log("Mapped Apple Music source URL \(track.sourceURL) to Spotify: \(mappedURL)")
+                source = DownloadSourceChoice(
+                    platform: .spotify,
+                    url: mappedURL,
+                    backendGenreSource: DownloadPlatform.spotify.backendGenreSource
+                )
+            } catch {
+                log("Failed to map Apple Music track \(track.name) to Spotify: \(error.localizedDescription)")
+            }
+        }
+        guard serverPreference == .deezerAPI,
+              let deezerSource = await resolvedDeezerFallbackSource(for: track, source: source) else {
+            return source
+        }
+        return deezerSource
+    }
+
+    private func resolvedDeezerFallbackSource(
+        for track: DownloadTrack,
+        source: DownloadSourceChoice
+    ) async -> DownloadSourceChoice? {
+        if let cached = cachedDeezerSourceURL(for: track.id) {
+            return DownloadSourceChoice(
+                platform: .deezer,
+                url: cached,
+                backendGenreSource: DownloadPlatform.deezer.backendGenreSource
+            )
+        }
+
+        if source.platform == .deezer {
+            cacheDeezerSourceURL(source.url, for: track.id)
             return source
         }
 
-        guard source.platform == .tidal else {
-            return source
+        if let exactDeezerSource = await resolveExactDeezerSource(for: track, source: source) {
+            log("Mapped track to Deezer via exact metadata: \(exactDeezerSource.url)")
+            cacheDeezerSourceURL(exactDeezerSource.url, for: track.id)
+            return exactDeezerSource
         }
 
-        if let remapped = await yoinkifyCompatibleSource(for: track) {
-            log("Remapped Tidal search result to Apple Music for Yoinkify: \(remapped.url)")
-            return remapped
+        do {
+            let mappedURL = try await fetchMappedURL(for: mappingSeedURL(for: track.sourceURL), platform: .deezer)
+            log("Mapped track to Deezer via Song.link: \(mappedURL)")
+            cacheDeezerSourceURL(mappedURL, for: track.id)
+            return DownloadSourceChoice(
+                platform: .deezer,
+                url: mappedURL,
+                backendGenreSource: DownloadPlatform.deezer.backendGenreSource
+            )
+        } catch {
+            log("Song.link Deezer mapping failed for \(track.name): \(error.localizedDescription)")
         }
 
-        log("No Yoinkify-compatible source found for Tidal search result. Skipping Yoinkify primary stage.")
-        return source
+        if let metadataFallback = await bestMetadataFallback(for: track),
+           let deezerSource = metadataFallback.source,
+           deezerSource.platform == .deezer {
+            log("Mapped track to Deezer via metadata fallback: \(deezerSource.url)")
+            cacheDeezerSourceURL(deezerSource.url, for: track.id)
+            return deezerSource
+        }
+
+        if let searchedDeezerSource = await resolveDeezerSource(for: track) {
+            log("Mapped track to Deezer via direct Deezer search: \(searchedDeezerSource.url)")
+            cacheDeezerSourceURL(searchedDeezerSource.url, for: track.id)
+            return searchedDeezerSource
+        }
+
+        return nil
     }
 
     private func primaryCandidates(
         for source: DownloadSourceChoice,
-        serverPreference: DownloaderServerPreference
+        serverPreference: DownloaderServerPreference,
+        track: DownloadTrack? = nil
     ) async throws -> [BackendCandidate] {
         var candidates: [BackendCandidate] = []
-        guard source.platform == .appleMusic || source.platform == .spotify || source.platform == .deezer || source.platform == .unknown else {
-            return candidates
+        if (serverPreference == .auto || serverPreference == .byeTunesAPI) &&
+            (source.platform == .appleMusic || source.platform == .spotify || source.platform == .deezer || source.platform == .unknown) {
+            candidates.append(contentsOf: try await byeTunesCandidates(for: source, serverPreference: serverPreference, track: track))
         }
-        let pow = await yoinkProofOfWork()
-        let format = yoinkifyFormat(for: serverPreference)
 
-        if let url = URL(string: "https://yoinkify.com/api/download") {
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            var payload: [String: Any] = [
-                "url": source.url,
-                "format": format,
-                "genreSource": source.backendGenreSource
-            ]
-            if let pow {
-                payload["pow"] = pow
+        if serverPreference == .yoinkify &&
+            (source.platform == .appleMusic || source.platform == .spotify || source.platform == .deezer || source.platform == .unknown) {
+            let pow = await yoinkProofOfWork()
+            let format = yoinkifyFormat(for: serverPreference)
+
+            if let url = URL(string: "https://yoinkify.com/api/download") {
+                var request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                var payload: [String: Any] = [
+                    "url": source.url,
+                    "format": format,
+                    "genreSource": source.backendGenreSource
+                ]
+                if let pow {
+                    payload["pow"] = pow
+                }
+                request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+                candidates.append(BackendCandidate(label: "Yoinkify", request: request, tidalAPIBaseURL: nil, customDownload: nil))
             }
-            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-            candidates.append(BackendCandidate(label: "Yoinkify", request: request, tidalAPIBaseURL: nil))
+        }
+
+        if serverPreference == .auto,
+           let track,
+           let deezerSource = await resolvedDeezerFallbackSource(for: track, source: source) {
+            candidates.append(contentsOf: try deezerExtensionCandidates(for: deezerSource))
+        }
+
+        switch source.platform {
+        case .appleMusic:
+            if serverPreference == .appleMusicAPI {
+                candidates.append(contentsOf: try appleExtensionCandidates(for: source))
+            }
+        case .deezer:
+            if serverPreference == .deezerAPI {
+                candidates.append(contentsOf: try deezerExtensionCandidates(for: source))
+            }
+        case .tidal:
+            if serverPreference == .tidalAPI {
+                candidates.append(contentsOf: try tidalExtensionCandidates(for: source))
+            }
+        case .amazon:
+            if serverPreference == .amazonAPI {
+                candidates.append(contentsOf: amazonExtensionCandidates(for: source))
+            }
+        case .pandora:
+            if serverPreference == .pandoraAPI {
+                candidates.append(contentsOf: try pandoraExtensionCandidates(for: source))
+            }
+        case .soundcloud:
+            if serverPreference == .soundCloudAPI {
+                candidates.append(contentsOf: try cobaltExtensionCandidates(for: source, providerLabel: "SoundCloud API (Cobalt)"))
+            }
+        case .youtubeMusic:
+            if serverPreference == .youtubeAPI {
+                candidates.append(contentsOf: try cobaltExtensionCandidates(for: source, providerLabel: "YouTube API (Cobalt)"))
+            }
+        case .spotify, .qobuz, .unknown:
+            break
         }
 
         return candidates
+    }
+
+    private func byeTunesCandidates(
+        for source: DownloadSourceChoice,
+        serverPreference: DownloaderServerPreference,
+        track: DownloadTrack? = nil
+    ) async throws -> [BackendCandidate] {
+        let urlString = "\(Config.byeTunesApiUrl)/api/download"
+        guard let url = URL(string: urlString) else {
+            throw DownloadError.invalidURL(urlString)
+        }
+
+        let desiredFormat = yoinkifyFormat(for: serverPreference)
+        let wantsSyncedLyrics =
+            UserDefaults.standard.bool(forKey: "fetchLyrics") ||
+            UserDefaults.standard.bool(forKey: "appleSubscriptionLyrics")
+
+        func makeCandidate(label: String, format: String, overrideURL: String? = nil) throws -> BackendCandidate {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "url": overrideURL ?? source.url,
+                "format": format,
+                "genreSource": source.backendGenreSource,
+                "syncedLyrics": wantsSyncedLyrics
+            ])
+            return BackendCandidate(label: label, request: request, tidalAPIBaseURL: nil, customDownload: nil)
+        }
+
+        var candidates = [try makeCandidate(label: "ByeTunes API", format: desiredFormat)]
+        if desiredFormat.lowercased() != "mp3" {
+            candidates.append(try makeCandidate(label: "ByeTunes API (MP3 Fallback)", format: "mp3"))
+        }
+
+        // For Apple Music sources, add a Spotify-URL candidate as fallback.
+        // The ByeTunes server resolves Spotify → Deezer far more reliably than
+        // Apple Music → Deezer. We try three paths to get a real
+        // open.spotify.com/track/ID URL (ISRC search format is rejected by server).
+        if source.platform == .appleMusic, let track {
+            var spotifyURL: String?
+
+            // Path 1: song.link with cached Deezer URL → Spotify
+            // Most reliable — track IS on Deezer so song.link can map it.
+            if spotifyURL == nil, let cachedDeezer = cachedDeezerSourceURL(for: track.id) {
+                if let mapped = try? await fetchMappedURL(for: cachedDeezer, platform: .spotify) {
+                    spotifyURL = mapped
+                    log("ByeTunes Spotify fallback: song.link Deezer→Spotify: \(mapped)")
+                }
+            }
+
+            // Path 2: Spotify anonymous web player token + ISRC search
+            // Spotify publicly vends unauthenticated tokens for the web player
+            // which allow metadata queries including ISRC search.
+            if spotifyURL == nil {
+                var isrc: String?
+
+                // Get ISRC from cached Deezer track
+                if let cachedDeezer = cachedDeezerSourceURL(for: track.id),
+                   let deezerID = cachedDeezer.components(separatedBy: "/").last, !deezerID.isEmpty,
+                   let apiURL = URL(string: "https://api.deezer.com/track/\(deezerID)"),
+                   let (data, _) = try? await URLSession.shared.data(from: apiURL),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let deezerISRC = json["isrc"] as? String, !deezerISRC.isEmpty {
+                    isrc = deezerISRC
+                }
+
+                // Get ISRC from Deezer title search if not cached
+                if isrc == nil {
+                    let results = await SongMetadata.searchDeezer(
+                        query: "\(track.artistLine) \(track.name)", limit: 3, index: 0
+                    )
+                    isrc = results.first?.isrc?.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+
+                if let isrc, !isrc.isEmpty {
+                    log("ByeTunes Spotify fallback: ISRC \(isrc) — fetching anon Spotify token")
+                    if let tokenURL = URL(string: "https://open.spotify.com/get_access_token?reason=transport&productType=web_player"),
+                       let (tokenData, _) = try? await URLSession.shared.data(from: tokenURL),
+                       let tokenJSON = try? JSONSerialization.jsonObject(with: tokenData) as? [String: Any],
+                       let accessToken = tokenJSON["accessToken"] as? String, !accessToken.isEmpty {
+                        var searchReq = URLRequest(url: URL(string: "https://api.spotify.com/v1/search?q=isrc%3A\(isrc)&type=track&limit=1")!)
+                        searchReq.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+                        if let (searchData, _) = try? await URLSession.shared.data(for: searchReq),
+                           let searchJSON = try? JSONSerialization.jsonObject(with: searchData) as? [String: Any],
+                           let tracks = searchJSON["tracks"] as? [String: Any],
+                           let items = tracks["items"] as? [[String: Any]],
+                           let firstTrack = items.first,
+                           let trackID = firstTrack["id"] as? String, !trackID.isEmpty {
+                            spotifyURL = "https://open.spotify.com/track/\(trackID)"
+                            log("ByeTunes Spotify fallback: anon Spotify token found track: \(spotifyURL!)")
+                        }
+                    }
+                }
+            }
+
+            // Path 3: song.link with Apple Music URL → Spotify (last resort)
+            if spotifyURL == nil,
+               let mapped = try? await fetchMappedURL(for: mappingSeedURL(for: source.url), platform: .spotify) {
+                spotifyURL = mapped
+                log("ByeTunes Spotify fallback: song.link AM→Spotify: \(mapped)")
+            }
+
+            if let spotifyURL {
+                candidates.append(try makeCandidate(label: "ByeTunes API (Spotify)", format: desiredFormat, overrideURL: spotifyURL))
+                if desiredFormat.lowercased() != "mp3" {
+                    candidates.append(try makeCandidate(label: "ByeTunes API (Spotify MP3 Fallback)", format: "mp3", overrideURL: spotifyURL))
+                }
+            }
+        }
+
+        return candidates
+    }
+
+    private func appleExtensionCandidates(for source: DownloadSourceChoice) throws -> [BackendCandidate] {
+        let codec = "alac"
+        let app2Payload = try JSONSerialization.data(withJSONObject: ["url": source.url, "codec": codec])
+        var candidates: [BackendCandidate] = []
+
+        if let request = makePOSTRequest(
+            label: "Apple Music API (app2)",
+            urlString: "https://api.zarz.moe/v1/dl/app2",
+            jsonBody: app2Payload
+        ) {
+            candidates.append(request)
+        }
+
+        candidates.append(
+            BackendCandidate(
+                label: "Apple Music API (app)",
+                request: nil,
+                tidalAPIBaseURL: nil,
+                customDownload: { [weak self] _, suggestedName, _ in
+                    guard let self else {
+                        throw DownloadError.remoteFailure("Apple Music queued downloader is unavailable.")
+                    }
+                    return try await self.runAppleQueuedDownload(sourceURL: source.url, codec: codec, suggestedName: suggestedName)
+                }
+            )
+        )
+
+        return candidates
+    }
+
+    private func deezerExtensionCandidates(for source: DownloadSourceChoice) throws -> [BackendCandidate] {
+        return [
+            BackendCandidate(
+                label: "Deezer API (Zarz)",
+                request: nil,
+                tidalAPIBaseURL: nil,
+                customDownload: { [weak self] _, suggestedName, _ in
+                    guard let self else {
+                        throw DownloadError.remoteFailure("Deezer downloader is unavailable.")
+                    }
+                    return try await self.runDeezerExtensionDownload(sourceURL: source.url, suggestedName: suggestedName)
+                }
+            )
+        ]
+    }
+
+    private func tidalExtensionCandidates(for source: DownloadSourceChoice) throws -> [BackendCandidate] {
+        let quality = tidalTrackQuality()
+        var candidates: [BackendCandidate] = []
+
+        if let trackID = DownloadSupport.tidalTrackID(from: source.url) {
+            let idPayload = try JSONSerialization.data(withJSONObject: [
+                "id": trackID,
+                "quality": quality
+            ])
+            if let request = makePOSTRequest(
+                label: "Tidal API (tid2)",
+                urlString: "https://api.zarz.moe/v1/dl/tid2",
+                jsonBody: idPayload
+            ) {
+                candidates.append(request)
+            }
+        }
+
+        let urlPayload = try JSONSerialization.data(withJSONObject: [
+            "url": source.url,
+            "quality": quality
+        ])
+        if let request = makePOSTRequest(
+            label: "Tidal API (tid)",
+            urlString: "https://api.zarz.moe/v1/dl/tid",
+            jsonBody: urlPayload
+        ) {
+            candidates.append(request)
+        }
+
+        return candidates
+    }
+
+    private func pandoraExtensionCandidates(for source: DownloadSourceChoice) throws -> [BackendCandidate] {
+        let payload = try JSONSerialization.data(withJSONObject: ["url": pandoraResolverInput(from: source.url)])
+        return [
+            makePOSTRequest(
+                label: "Pandora API (Zarz)",
+                urlString: "https://api.zarz.moe/v1/dl/pan",
+                jsonBody: payload
+            )
+        ].compactMap { $0 }
+    }
+
+    private func amazonExtensionCandidates(for source: DownloadSourceChoice) -> [BackendCandidate] {
+        guard let asin = amazonASIN(from: source.url) else { return [] }
+        return [
+            makeRequest(
+                label: "Amazon Music API (Zarz)",
+                urlString: "https://api.zarz.moe/v1/dl/amazeamazeamaze/media?asin=\(asin)&codec=flac"
+            )
+        ].compactMap { $0 }
+    }
+
+    private func cobaltExtensionCandidates(for source: DownloadSourceChoice, providerLabel: String) throws -> [BackendCandidate] {
+        let payload = try JSONSerialization.data(withJSONObject: [
+            "url": source.url,
+            "downloadMode": "audio",
+            "audioFormat": "best"
+        ])
+        return [
+            makePOSTRequest(
+                label: providerLabel,
+                urlString: "https://api.zarz.moe/v1/dl/cobalt",
+                jsonBody: payload
+            )
+        ].compactMap { $0 }
+    }
+
+    private func runAppleQueuedDownload(sourceURL: String, codec: String, suggestedName: String) async throws -> URL {
+        guard let startURL = URL(string: "https://api.zarz.moe/v1/dl/app/download") else {
+            throw DownloadError.invalidURL("https://api.zarz.moe/v1/dl/app/download")
+        }
+
+        var startRequest = URLRequest(url: startURL)
+        startRequest.httpMethod = "POST"
+        applyZarzHeaders(to: &startRequest)
+        startRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        startRequest.httpBody = try JSONSerialization.data(withJSONObject: [
+            "url": sourceURL,
+            "codec": codec
+        ])
+
+        let startObject = try await performJSONObjectRequest(startRequest)
+        if let immediateURL = extractProviderDownloadURL(from: startObject) {
+            return try await executeDownloadRequest(
+                URLRequest(url: immediateURL),
+                trackID: sourceURL,
+                suggestedName: suggestedName,
+                fallbackExtension: "m4a"
+            )
+        }
+
+        guard let jobID = findFirstString(in: startObject, matching: ["job_id", "jobId", "id"]), !jobID.isEmpty else {
+            throw DownloadError.remoteFailure("Apple Music queued download did not return a job ID.")
+        }
+
+        for _ in 0..<40 {
+            try await Task.sleep(nanoseconds: 1_500_000_000)
+
+            guard let statusURL = URL(string: "https://api.zarz.moe/v1/dl/app/status/\(jobID)") else {
+                throw DownloadError.invalidURL("https://api.zarz.moe/v1/dl/app/status/\(jobID)")
+            }
+            var statusRequest = URLRequest(url: statusURL)
+            applyZarzHeaders(to: &statusRequest)
+            let statusObject = try await performJSONObjectRequest(statusRequest)
+
+            if let resolvedURL = extractProviderDownloadURL(from: statusObject) {
+                return try await executeDownloadRequest(
+                    URLRequest(url: resolvedURL),
+                    trackID: sourceURL,
+                    suggestedName: suggestedName,
+                    fallbackExtension: "m4a"
+                )
+            }
+
+            if let status = findFirstString(in: statusObject, matching: ["status", "state"])?.lowercased(),
+               status.contains("failed") || status.contains("error") {
+                throw DownloadError.remoteFailure("Apple Music queued download failed with status '\(status)'.")
+            }
+
+            if let ready = findFirstString(in: statusObject, matching: ["status", "state"])?.lowercased(),
+               ready.contains("complete") || ready.contains("completed") || ready.contains("success") || ready.contains("done") {
+                break
+            }
+        }
+
+        guard let fileURL = URL(string: "https://api.zarz.moe/v1/dl/app/file/\(jobID)") else {
+            throw DownloadError.invalidURL("https://api.zarz.moe/v1/dl/app/file/\(jobID)")
+        }
+        var fileRequest = URLRequest(url: fileURL)
+        applyZarzHeaders(to: &fileRequest)
+        return try await executeDownloadRequest(
+            fileRequest,
+            trackID: sourceURL,
+            suggestedName: suggestedName,
+            fallbackExtension: "m4a"
+        )
+    }
+
+    private func performJSONObjectRequest(_ request: URLRequest) async throws -> [String: Any] {
+        let (data, response) = try await session.data(for: request)
+        try validateHTTP(response: response, data: data)
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            let bodyText = String(data: data, encoding: .utf8) ?? "<non-utf8 body>"
+            throw DownloadError.remoteFailure(bodyText)
+        }
+        return object
+    }
+
+    private func runDeezerExtensionDownload(sourceURL: String, suggestedName: String) async throws -> URL {
+        if let cachedDescriptor = cachedDeezerDescriptor(for: sourceURL) {
+            do {
+                let fileURL = try await downloadDeezerDescriptor(cachedDescriptor, suggestedName: suggestedName)
+                log("Reused cached Deezer stream URL for \(suggestedName)")
+                return fileURL
+            } catch {
+                clearCachedDeezerDescriptor(for: sourceURL)
+                log("Cached Deezer stream URL failed for \(suggestedName): \(error.localizedDescription)")
+            }
+        }
+
+        guard let resolverURL = URL(string: "https://api.zarz.moe/v1/dl/dzr") else {
+            throw DownloadError.invalidURL("https://api.zarz.moe/v1/dl/dzr")
+        }
+
+        var request = URLRequest(url: resolverURL)
+        request.httpMethod = "POST"
+        applyZarzHeaders(to: &request)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "platform": "deezer",
+            "url": sourceURL
+        ])
+
+        let descriptor = try await performRetryingDeezerResolverRequest(request)
+        cacheDeezerDescriptor(descriptor, for: sourceURL)
+        return try await downloadDeezerDescriptor(descriptor, suggestedName: suggestedName, fallbackTrackID: deezerTrackID(from: sourceURL))
+    }
+
+    private func downloadDeezerDescriptor(
+        _ descriptor: [String: Any],
+        suggestedName: String,
+        fallbackTrackID: String? = nil
+    ) async throws -> URL {
+        guard let downloadURL = extractProviderDownloadURL(from: descriptor) else {
+            throw DownloadError.remoteFailure("Deezer resolver did not return a download URL.")
+        }
+
+        let downloadRequest = URLRequest(url: downloadURL)
+        let (encryptedData, response) = try await fetchDataWithProgress(for: downloadRequest) { [weak self] progress, speedBps in
+            self?.currentSongProgress = progress
+            self?.currentDownloadSpeedBps = speedBps
+        }
+        try validateHTTP(response: response, data: encryptedData)
+
+        let requiresDecryption = findFirstBool(in: descriptor, matching: ["requires_client_decryption", "deezer_encrypted"]) ?? false
+        let fileFormat = (findFirstString(in: descriptor, matching: ["deezer_format", "format"]) ?? "flac").lowercased()
+        let decryptedData: Data
+        if requiresDecryption {
+            let trackID = findFirstString(in: descriptor, matching: ["deezer_track_id", "track_id"]) ?? fallbackTrackID
+            guard let trackID, let blowfishKey = deezerBlowfishKey(for: trackID) else {
+                throw DownloadError.remoteFailure("Deezer download requires decryption, but no track key could be derived.")
+            }
+            decryptedData = try decryptDeezerStream(encryptedData, key: blowfishKey)
+        } else {
+            decryptedData = encryptedData
+        }
+
+        let mimeType = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type")
+        let fileExtension = deezerFileExtension(format: fileFormat, mimeType: mimeType)
+        return try saveDownloadedData(decryptedData, suggestedName: suggestedName, fileExtension: fileExtension)
+    }
+
+    private func performRetryingDeezerResolverRequest(_ request: URLRequest) async throws -> [String: Any] {
+        let deadline = Date().addingTimeInterval(TimeInterval(DeezerResolverPolicy.maxAutomaticWaitSeconds))
+        var lastError: Error?
+
+        resolverWindow: while Date() < deadline {
+            if let cooldown = deezerResolverCooldownRemaining() {
+                let remainingWindow = max(1, Int(ceil(deadline.timeIntervalSinceNow)))
+                let waitSeconds = min(cooldown, remainingWindow)
+                log("Waiting \(waitSeconds)s for Deezer resolver cooldown before retrying.")
+                try await Task.sleep(nanoseconds: UInt64(waitSeconds) * 1_000_000_000)
+                continue
+            }
+
+            resolverAttempts: for attempt in 1...3 {
+                do {
+                    return try await performJSONObjectRequest(request)
+                } catch {
+                    lastError = error
+                    if let retryAfter = deezerRetryAfterSeconds(from: error) {
+                        rememberDeezerResolverCooldown(seconds: retryAfter)
+                        continue resolverWindow
+                    }
+                    guard attempt < 3, isRetryableDeezerResolverError(error) else {
+                        throw error
+                    }
+                    log("Retrying Deezer resolver after transient failure (\(attempt)/3): \(error.localizedDescription)")
+                    try? await Task.sleep(nanoseconds: UInt64(attempt) * 750_000_000)
+                }
+            }
+        }
+
+        if let cooldown = deezerResolverCooldownRemaining(), cooldown > 0 {
+            throw DownloadError.mappingFailed("Deezer stayed overloaded for several minutes. Try again a bit later.")
+        }
+
+        throw lastError ?? DownloadError.remoteFailure("Deezer resolver failed.")
+    }
+
+    private func deezerRetryAfterSeconds(from error: Error) -> Int? {
+        guard case let DownloadError.httpError(code, body) = error, code == 429 || (500...504).contains(code) else {
+            return nil
+        }
+
+        guard let data = body.data(using: .utf8),
+              let payload = try? JSONDecoder().decode(DeezerResolverCooldownPayload.self, from: data),
+              let retryAfter = payload.retry_after,
+              retryAfter > 0 else {
+            return nil
+        }
+        return retryAfter
+    }
+
+    private func isRetryableDeezerResolverError(_ error: Error) -> Bool {
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .timedOut, .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed, .networkConnectionLost, .notConnectedToInternet:
+                return true
+            default:
+                break
+            }
+        }
+
+        guard case let DownloadError.httpError(code, _) = error else {
+            return false
+        }
+        return code == 429 || (500...504).contains(code)
+    }
+
+    private func cacheDeezerSourceURL(_ url: String, for trackID: String) {
+        guard !trackID.isEmpty, !url.isEmpty else { return }
+        UserDefaults.standard.set(url, forKey: "deezerSourceURL.\(trackID)")
+    }
+
+    private func cachedDeezerSourceURL(for trackID: String) -> String? {
+        guard !trackID.isEmpty else { return nil }
+        return UserDefaults.standard.string(forKey: "deezerSourceURL.\(trackID)")
+    }
+
+    private func cacheDeezerDescriptor(_ descriptor: [String: Any], for sourceURL: String) {
+        guard !sourceURL.isEmpty,
+              let downloadURL = extractProviderDownloadURL(from: descriptor)?.absoluteString else { return }
+
+        let payload = CachedDeezerDescriptor(
+            downloadURL: downloadURL,
+            requiresClientDecryption: findFirstBool(in: descriptor, matching: ["requires_client_decryption", "deezer_encrypted"]) ?? false,
+            fileFormat: (findFirstString(in: descriptor, matching: ["deezer_format", "format"]) ?? "flac").lowercased(),
+            trackID: findFirstString(in: descriptor, matching: ["deezer_track_id", "track_id"]) ?? deezerTrackID(from: sourceURL),
+            cachedAt: Date()
+        )
+
+        guard let data = try? JSONEncoder().encode(payload) else { return }
+        UserDefaults.standard.set(data, forKey: "deezerDescriptor.\(sourceURL)")
+    }
+
+    private func cachedDeezerDescriptor(for sourceURL: String) -> [String: Any]? {
+        guard !sourceURL.isEmpty,
+              let data = UserDefaults.standard.data(forKey: "deezerDescriptor.\(sourceURL)"),
+              let payload = try? JSONDecoder().decode(CachedDeezerDescriptor.self, from: data) else {
+            return nil
+        }
+
+        if Date().timeIntervalSince(payload.cachedAt) > 900 {
+            clearCachedDeezerDescriptor(for: sourceURL)
+            return nil
+        }
+
+        var descriptor: [String: Any] = [
+            "direct_download_url": payload.downloadURL,
+            "download_url": payload.downloadURL,
+            "requires_client_decryption": payload.requiresClientDecryption,
+            "deezer_format": payload.fileFormat
+        ]
+        if let trackID = payload.trackID, !trackID.isEmpty {
+            descriptor["track_id"] = trackID
+            descriptor["deezer_track_id"] = trackID
+        }
+        return descriptor
+    }
+
+    private func clearCachedDeezerDescriptor(for sourceURL: String) {
+        guard !sourceURL.isEmpty else { return }
+        UserDefaults.standard.removeObject(forKey: "deezerDescriptor.\(sourceURL)")
+    }
+
+    private func rememberDeezerResolverCooldown(seconds: Int) {
+        let safeSeconds = max(seconds, 1)
+        let until = Date().addingTimeInterval(TimeInterval(safeSeconds))
+        UserDefaults.standard.set(until, forKey: "deezerResolverCooldownUntil")
+    }
+
+    private func deezerResolverCooldownRemaining() -> Int? {
+        guard let until = UserDefaults.standard.object(forKey: "deezerResolverCooldownUntil") as? Date else {
+            return nil
+        }
+        let remaining = Int(ceil(until.timeIntervalSinceNow))
+        return remaining > 0 ? remaining : nil
+    }
+
+    private func amazonASIN(from urlString: String) -> String? {
+        let patterns = [
+            #"/([A-Z0-9]{10})(?:[/?]|$)"#,
+            #"asin=([A-Z0-9]{10})(?:[&]|$)"#
+        ]
+        for pattern in patterns {
+            if let regex = try? NSRegularExpression(pattern: pattern),
+               let match = regex.firstMatch(in: urlString, range: NSRange(location: 0, length: urlString.utf16.count)),
+               let range = Range(match.range(at: 1), in: urlString) {
+                return String(urlString[range])
+            }
+        }
+        return nil
+    }
+
+    private func pandoraResolverInput(from urlString: String) -> String {
+        guard let tokenRange = urlString.range(of: #"/(TR[A-Za-z0-9]+)"#, options: .regularExpression) else {
+            return urlString
+        }
+
+        let token = String(urlString[tokenRange]).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard let match = token.range(of: #"^([A-Za-z]+)(\d+)"#, options: .regularExpression) else {
+            return urlString
+        }
+
+        let prefixDigits = String(token[match])
+        let letters = prefixDigits.prefix { $0.isLetter }
+        let digits = prefixDigits.drop { $0.isLetter }
+        guard !letters.isEmpty, !digits.isEmpty else { return urlString }
+        return "\(letters):\(digits)"
+    }
+
+    private func deezerTrackID(from urlString: String) -> String? {
+        guard let range = urlString.range(of: "/track/") else { return nil }
+        let tail = urlString[range.upperBound...]
+        let value = tail.split(separator: "?").first?.split(separator: "/").first.map(String.init) ?? ""
+        return value.isEmpty ? nil : value
+    }
+
+    private func deezerFileExtension(format: String, mimeType: String?) -> String {
+        if format.contains("flac") { return "flac" }
+        if format.contains("mp3") { return "mp3" }
+        return DownloadSupport.fileExtension(for: mimeType, fallback: "flac")
+    }
+
+    private func deezerBlowfishKey(for trackID: String) -> Data? {
+        let digest = Insecure.MD5.hash(data: Data(trackID.utf8))
+        let hex = digest.map { String(format: "%02x", $0) }.joined()
+        let secret = Array("g4el58wc0zvf9na1".utf8)
+        let md5Bytes = Array(hex.utf8)
+        guard md5Bytes.count >= 32, secret.count == 16 else { return nil }
+
+        var keyBytes = [UInt8]()
+        keyBytes.reserveCapacity(16)
+        for index in 0..<16 {
+            keyBytes.append(md5Bytes[index] ^ md5Bytes[index + 16] ^ secret[index])
+        }
+        return Data(keyBytes)
+    }
+
+    private func decryptDeezerStream(_ encryptedData: Data, key: Data) throws -> Data {
+        let chunkSize = 2048
+        let iv = Data([0, 1, 2, 3, 4, 5, 6, 7])
+        var output = Data(capacity: encryptedData.count)
+        var offset = 0
+        var chunkIndex = 0
+
+        while offset < encryptedData.count {
+            let end = min(offset + chunkSize, encryptedData.count)
+            let chunk = encryptedData[offset..<end]
+
+            if chunkIndex % 3 == 0 && chunk.count == chunkSize {
+                output.append(try blowfishCBCDecrypt(Data(chunk), key: key, iv: iv))
+            } else {
+                output.append(chunk)
+            }
+
+            offset = end
+            chunkIndex += 1
+        }
+
+        return output
+    }
+
+    private func blowfishCBCDecrypt(_ data: Data, key: Data, iv: Data) throws -> Data {
+        var outLength = 0
+        var outData = Data(count: data.count + kCCBlockSizeBlowfish)
+        let outCapacity = outData.count
+        let status = outData.withUnsafeMutableBytes { outBytes in
+            data.withUnsafeBytes { dataBytes in
+                key.withUnsafeBytes { keyBytes in
+                    iv.withUnsafeBytes { ivBytes in
+                        CCCrypt(
+                            CCOperation(kCCDecrypt),
+                            CCAlgorithm(kCCAlgorithmBlowfish),
+                            CCOptions(0),
+                            keyBytes.baseAddress,
+                            key.count,
+                            ivBytes.baseAddress,
+                            dataBytes.baseAddress,
+                            data.count,
+                            outBytes.baseAddress,
+                            outCapacity,
+                            &outLength
+                        )
+                    }
+                }
+            }
+        }
+
+        guard status == kCCSuccess else {
+            throw DownloadError.remoteFailure("Deezer Blowfish decryption failed (\(status)).")
+        }
+
+        outData.count = outLength
+        return outData
     }
 
     private func yoinkifyCompatibleSource(for track: DownloadTrack) async -> DownloadSourceChoice? {
@@ -3691,15 +4940,125 @@ final class DownloadViewModel: ObservableObject {
         return score
     }
 
-    private func yoinkifyFormat(for serverPreference: DownloaderServerPreference) -> String {
-        if serverPreference == .auto {
-            switch DownloaderAutomaticQualityProfile(rawValue: UserDefaults.standard.string(forKey: "autoDownloadTier") ?? "") ?? .high {
-            case .low, .medium:
-                return "mp3"
-            case .high:
-                return "flac"
+    private func resolveDeezerSource(for track: DownloadTrack) async -> DownloadSourceChoice? {
+        let appleSong = await AppleMusicAPI.shared.fetchSong(id: track.id)
+        let metadataFallback = appleSong == nil ? await bestMetadataFallback(for: track) : nil
+        let searchQueries = buildTidalSearchQueries(for: track, appleSong: appleSong, metadataFallback: metadataFallback)
+        let exactISRC = appleSong?.attributes.isrc?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var deezerResults: [DeezerSong] = []
+        var seenIDs = Set<Int>()
+        for query in searchQueries {
+            let results = await SongMetadata.searchDeezer(query: query, limit: 10, index: 0)
+            for candidate in results where seenIDs.insert(candidate.id).inserted {
+                deezerResults.append(candidate)
+            }
+            if !deezerResults.isEmpty {
+                break
             }
         }
+
+        let ranked = deezerResults
+            .map { candidate in
+                (
+                    candidate,
+                    scoreDeezerCandidate(candidate, for: track, exactISRC: exactISRC)
+                )
+            }
+            .sorted {
+                if $0.1 == $1.1 {
+                    return ($0.0.rank ?? 0) > ($1.0.rank ?? 0)
+                }
+                return $0.1 > $1.1
+            }
+
+        guard let best = ranked.first, best.1 >= 120 else { return nil }
+        let url = best.0.link ?? "https://www.deezer.com/track/\(best.0.id)"
+        return DownloadSourceChoice(
+            platform: .deezer,
+            url: url,
+            backendGenreSource: DownloadPlatform.deezer.backendGenreSource
+        )
+    }
+
+    private func resolveExactDeezerSource(
+        for track: DownloadTrack,
+        source: DownloadSourceChoice
+    ) async -> DownloadSourceChoice? {
+        guard source.platform == .appleMusic || source.platform == .spotify else {
+            return nil
+        }
+
+        guard track.id.allSatisfy(\.isNumber) else {
+            return nil
+        }
+
+        guard let appleSong = await AppleMusicAPI.shared.fetchSong(id: track.id),
+              let isrc = appleSong.attributes.isrc?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !isrc.isEmpty,
+              let deezerSong = await SongMetadata.fetchDeezerTrackByISRC(isrc) else {
+            return nil
+        }
+
+        let score = scoreDeezerCandidate(deezerSong, for: track, exactISRC: isrc)
+        let sourcePrimaryArtist = DownloadSupport.normalizedSearchValue(primaryArtistName(from: track.artistLine))
+        let deezerPrimaryArtist = DownloadSupport.normalizedSearchValue(deezerSong.artist.name)
+        let sourceTitle = DownloadSupport.normalizedSearchValue(simplifiedTrackTitle(track.name))
+        let deezerTitle = DownloadSupport.normalizedSearchValue(simplifiedTrackTitle(deezerSong.title))
+
+        guard sourcePrimaryArtist == deezerPrimaryArtist else {
+            log("Rejected Deezer ISRC match for \(track.name): artist mismatch \(deezerSong.artist.name)")
+            return nil
+        }
+
+        guard sourceTitle == deezerTitle || deezerTitle.contains(sourceTitle) || sourceTitle.contains(deezerTitle) else {
+            log("Rejected Deezer ISRC match for \(track.name): title mismatch \(deezerSong.title)")
+            return nil
+        }
+
+        guard score >= 240 else { return nil }
+
+        let url = deezerSong.link ?? "https://www.deezer.com/track/\(deezerSong.id)"
+        return DownloadSourceChoice(
+            platform: .deezer,
+            url: url,
+            backendGenreSource: DownloadPlatform.deezer.backendGenreSource
+        )
+    }
+
+    private func scoreDeezerCandidate(_ candidate: DeezerSong, for track: DownloadTrack, exactISRC: String?) -> Int {
+        var score = scoreMetadataFallback(
+            title: candidate.title,
+            artist: candidate.artist.name,
+            album: candidate.album.title,
+            for: track
+        )
+
+        let candidateISRC = candidate.isrc?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let expectedISRC = exactISRC?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let candidateISRC, let expectedISRC, !candidateISRC.isEmpty, candidateISRC == expectedISRC {
+            score += 120
+        }
+
+        let primaryArtist = DownloadSupport.normalizedSearchValue(primaryArtistName(from: track.artistLine))
+        let candidateArtist = DownloadSupport.normalizedSearchValue(candidate.artist.name)
+        if candidateArtist == primaryArtist {
+            score += 35
+        }
+
+        let simplifiedTrack = DownloadSupport.normalizedSearchValue(simplifiedTrackTitle(track.name))
+        let candidateTitle = DownloadSupport.normalizedSearchValue(candidate.title)
+        if candidateTitle == simplifiedTrack {
+            score += 20
+        }
+
+        return score
+    }
+
+    private func yoinkifyFormat(for serverPreference: DownloaderServerPreference) -> String {
+        // Always respect the user's explicit "Output Format" setting.
+        // The autoDownloadTier quality profile path was bypassing the user's choice
+        // because downloadWithFallbacks always passes .auto as the server preference.
         return UserDefaults.standard.string(forKey: "yoinkifyFormat") ?? "flac"
     }
 
@@ -3884,7 +5243,12 @@ final class DownloadViewModel: ObservableObject {
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = payload
-            return BackendCandidate(label: provider.label, request: request, tidalAPIBaseURL: nil)
+            return BackendCandidate(
+                label: provider.label,
+                request: request,
+                tidalAPIBaseURL: nil,
+                customDownload: nil
+            )
         }
     }
 
@@ -3926,9 +5290,9 @@ final class DownloadViewModel: ObservableObject {
                 preferredBaseURL: "https://hifi-two.spotisaver.net",
                 preferredLabel: "HiFi Two"
             )
-        case .qobuz:
+        case .byeTunesAPI, .qobuz, .appleMusicAPI, .deezerAPI, .pandoraAPI, .amazonAPI, .soundCloudAPI, .youtubeAPI:
             return []
-        case .auto, .yoinkify:
+        case .auto, .yoinkify, .tidalAPI:
             return await tidalCandidates(trackID: trackID)
         }
     }
@@ -4079,20 +5443,29 @@ final class DownloadViewModel: ObservableObject {
 
         for candidate in candidates {
             do {
-                let fileURL = try await executeDownloadRequest(
-                    candidate.request,
-                    trackID: trackID,
-                    suggestedName: suggestedName,
-                    fallbackExtension: fallbackExtension
-                )
+                let fileURL: URL
+                if let customDownload = candidate.customDownload {
+                    fileURL = try await customDownload(trackID, suggestedName, fallbackExtension)
+                } else if let request = candidate.request {
+                    fileURL = try await executeDownloadRequest(
+                        request,
+                        trackID: trackID,
+                        suggestedName: suggestedName,
+                        fallbackExtension: fallbackExtension
+                    )
+                } else {
+                    throw DownloadError.mappingFailed("No usable backend request was created for \(candidate.label).")
+                }
                 if let tidalAPIBaseURL = candidate.tidalAPIBaseURL {
                     rememberTidalAPIBaseURLSuccess(tidalAPIBaseURL)
                 }
                 log("\(candidate.label) backend succeeded.")
+                BackendHealthStore.shared.recordSuccess(label: candidate.label)
                 return BackendDownloadOutcome(fileURL: fileURL, backendLabel: candidate.label)
             } catch {
                 lastError = error
                 log("\(candidate.label) backend failed: \(error.localizedDescription)")
+                BackendHealthStore.shared.recordFailure(label: candidate.label, error: error.localizedDescription)
             }
         }
 
@@ -4110,7 +5483,9 @@ final class DownloadViewModel: ObservableObject {
             throw DownloadError.mappingFailed("Too many redirect/manifest hops.")
         }
 
-        log("Requesting \(request.url?.absoluteString ?? "<unknown>")")
+        var request = request
+        applyZarzHeaders(to: &request)
+        log("Requesting \(redactedDownloadURLString(request.url))")
 
         let (data, response) = try await fetchDataWithProgress(for: request) { [weak self] progress, speedBps in
             self?.currentSongProgress = progress
@@ -4119,7 +5494,7 @@ final class DownloadViewModel: ObservableObject {
         try validateHTTP(response: response, data: data)
 
         if let manifestURL = extractManifestURL(from: data) {
-            log("Resolved manifest media URL: \(manifestURL)")
+            log("Resolved manifest media URL: \(redactedDownloadURLString(manifestURL))")
             let redirectedRequest = URLRequest(url: manifestURL)
             return try await executeDownloadRequest(
                 redirectedRequest,
@@ -4131,7 +5506,7 @@ final class DownloadViewModel: ObservableObject {
         }
 
         if let redirectedURL = extractRedirectURL(from: data) {
-            log("Received JSON redirect: \(redirectedURL)")
+            log("Received JSON redirect: \(redactedDownloadURLString(redirectedURL))")
             let redirectedRequest = URLRequest(url: redirectedURL)
             return try await executeDownloadRequest(
                 redirectedRequest,
@@ -4158,6 +5533,14 @@ final class DownloadViewModel: ObservableObject {
         return try saveDownloadedData(data, suggestedName: suggestedName, fileExtension: fileExtension)
     }
 
+    private func redactedDownloadURLString(_ url: URL?) -> String {
+        guard let url else { return "<unknown>" }
+        if url.host?.caseInsensitiveCompare(Config.byeTunesApiHost) == .orderedSame {
+            return "ByeTunes API"
+        }
+        return url.absoluteString
+    }
+
     private func validateHTTP(response: URLResponse, data: Data) throws {
         guard let http = response as? HTTPURLResponse else { return }
         guard (200...299).contains(http.statusCode) else {
@@ -4171,27 +5554,18 @@ final class DownloadViewModel: ObservableObject {
             let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
 
-        let keys = ["manifest_url", "manifestUrl", "stream_url", "streamUrl", "media_url", "mediaUrl"]
-        for key in keys {
-            if let value = obj[key] as? String, let url = URL(string: value) {
-                return url
-            }
-        }
-        if let dataObj = obj["data"] as? [String: Any] {
-            for key in keys {
-                if let value = dataObj[key] as? String, let url = URL(string: value) {
-                    return url
-                }
-            }
-            if let manifest = dataObj["manifest"] as? String,
-               let resolved = decodeManifestMediaURL(manifest) {
-                return resolved
-            }
-        }
-        if let manifest = obj["manifest"] as? String,
+        if let manifest = findFirstString(in: obj, matching: ["manifest"]),
            let resolved = decodeManifestMediaURL(manifest) {
             return resolved
         }
+
+        if let direct = findFirstURLString(
+            in: obj,
+            matching: ["manifest_url", "manifestUrl", "stream_url", "streamUrl", "media_url", "mediaUrl"]
+        ), let url = URL(string: direct) {
+            return url
+        }
+
         return nil
     }
 
@@ -4214,6 +5588,125 @@ final class DownloadViewModel: ObservableObject {
         return nil
     }
 
+    private func extractProviderDownloadURL(from object: [String: Any]) -> URL? {
+        if let manifest = findFirstString(in: object, matching: ["manifest"]),
+           let decoded = decodeManifestMediaURL(manifest) {
+            return decoded
+        }
+
+        if let direct = findFirstURLString(
+            in: object,
+            matching: [
+                "stream_url",
+                "streamUrl",
+                "direct_download_url",
+                "directDownloadUrl",
+                "download_url",
+                "downloadUrl",
+                "media_url",
+                "mediaUrl",
+                "url",
+                "link"
+            ]
+        ), let url = URL(string: direct) {
+            return url
+        }
+
+        return nil
+    }
+
+    private func findFirstURLString(in object: Any, matching preferredKeys: [String]) -> String? {
+        for key in preferredKeys {
+            if let value = findFirstString(in: object, matching: [key]), URL(string: value) != nil {
+                return value
+            }
+        }
+
+        if let dictionary = object as? [String: Any] {
+            for value in dictionary.values {
+                if let match = findFirstURLString(in: value, matching: preferredKeys) {
+                    return match
+                }
+            }
+        } else if let array = object as? [Any] {
+            for value in array {
+                if let match = findFirstURLString(in: value, matching: preferredKeys) {
+                    return match
+                }
+            }
+        } else if let string = object as? String, URL(string: string) != nil {
+            return string
+        }
+
+        return nil
+    }
+
+    private func findFirstString(in object: Any, matching keys: [String]) -> String? {
+        let normalizedKeys = Set(keys.map { $0.lowercased() })
+
+        if let dictionary = object as? [String: Any] {
+            for (key, value) in dictionary {
+                if normalizedKeys.contains(key.lowercased()), let stringValue = value as? String, !stringValue.isEmpty {
+                    return stringValue
+                }
+            }
+
+            for value in dictionary.values {
+                if let match = findFirstString(in: value, matching: keys) {
+                    return match
+                }
+            }
+        } else if let array = object as? [Any] {
+            for value in array {
+                if let match = findFirstString(in: value, matching: keys) {
+                    return match
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private func findFirstBool(in object: Any, matching keys: [String]) -> Bool? {
+        let normalizedKeys = Set(keys.map { $0.lowercased() })
+
+        if let dictionary = object as? [String: Any] {
+            for (key, value) in dictionary {
+                guard normalizedKeys.contains(key.lowercased()) else { continue }
+                if let boolValue = value as? Bool {
+                    return boolValue
+                }
+                if let stringValue = value as? String {
+                    switch stringValue.lowercased() {
+                    case "true", "1", "yes":
+                        return true
+                    case "false", "0", "no":
+                        return false
+                    default:
+                        break
+                    }
+                }
+                if let intValue = value as? Int {
+                    return intValue != 0
+                }
+            }
+
+            for value in dictionary.values {
+                if let match = findFirstBool(in: value, matching: keys) {
+                    return match
+                }
+            }
+        } else if let array = object as? [Any] {
+            for value in array {
+                if let match = findFirstBool(in: value, matching: keys) {
+                    return match
+                }
+            }
+        }
+
+        return nil
+    }
+
     private func padBase64(_ value: String) -> String {
         let remainder = value.count % 4
         guard remainder != 0 else { return value }
@@ -4225,18 +5718,24 @@ final class DownloadViewModel: ObservableObject {
             let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
 
-        let keys = ["url", "download_url", "downloadUrl", "redirect_url", "redirectUrl", "link"]
-        for key in keys {
-            if let value = obj[key] as? String, let url = URL(string: value) {
-                return url
-            }
-        }
-        if let dataObj = obj["data"] as? [String: Any] {
-            for key in keys {
-                if let value = dataObj[key] as? String, let url = URL(string: value) {
-                    return url
-                }
-            }
+        if let value = findFirstURLString(
+            in: obj,
+            matching: [
+                "url",
+                "download_url",
+                "downloadUrl",
+                "redirect_url",
+                "redirectUrl",
+                "direct_download_url",
+                "directDownloadUrl",
+                "stream_url",
+                "streamUrl",
+                "media_url",
+                "mediaUrl",
+                "link"
+            ]
+        ), let url = URL(string: value) {
+            return url
         }
         return nil
     }
@@ -4760,88 +6259,58 @@ final class DownloadViewModel: ObservableObject {
         guard let url = URL(string: urlString) else { return nil }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        return BackendCandidate(label: label, request: request, tidalAPIBaseURL: tidalAPIBaseURL)
+        applyZarzHeaders(to: &request)
+        return BackendCandidate(label: label, request: request, tidalAPIBaseURL: tidalAPIBaseURL, customDownload: nil)
+    }
+
+    private func makePOSTRequest(label: String, urlString: String, jsonBody: Data, tidalAPIBaseURL: String? = nil) -> BackendCandidate? {
+        guard let url = URL(string: urlString) else { return nil }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        applyZarzHeaders(to: &request)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = jsonBody
+        return BackendCandidate(label: label, request: request, tidalAPIBaseURL: tidalAPIBaseURL, customDownload: nil)
+    }
+
+    private func applyZarzHeaders(to request: inout URLRequest) {
+        guard request.url?.host?.contains("zarz.moe") == true else { return }
+        request.setValue("SpotiFLAC-Mobile/4.5.5", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
     }
 
     private func searchAlbums(query: String, limit: Int, offset: Int = 0) async -> [AppleMusicAlbumResult] {
-        guard let token = await AppleMusicAPI.shared.getToken() else { return [] }
-
-        let region = UserDefaults.standard.string(forKey: "storeRegion")?.lowercased() ?? "us"
-        var components = URLComponents(string: "https://amp-api.music.apple.com/v1/catalog/\(region)/search")!
-        components.queryItems = [
-            URLQueryItem(name: "term", value: query),
-            URLQueryItem(name: "types", value: "albums"),
-            URLQueryItem(name: "limit", value: String(limit)),
-            URLQueryItem(name: "offset", value: String(offset))
-        ]
-        guard let url = components.url else { return [] }
-
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("https://music.apple.com", forHTTPHeaderField: "Origin")
-
-        do {
-            let (data, _) = try await session.data(for: request)
-            let decoded = try JSONDecoder().decode(AppleMusicAlbumSearchResponse.self, from: data)
-            if let albums = decoded.results?.albums?.data {
-                return albums
-            }
-
-            if let firstError = decoded.errors?.first {
-                let summary = [firstError.status, firstError.code, firstError.title, firstError.detail]
-                    .compactMap { $0 }
-                    .joined(separator: " | ")
-                log("Album search returned no results: \(summary)")
-            } else if let payload = String(data: data.prefix(300), encoding: .utf8) {
-                log("Album search returned no results. Payload preview: \(payload)")
-            } else {
-                log("Album search returned no results.")
-            }
-            return []
-        } catch {
-            log("Album search failed: \(error.localizedDescription)")
-            return []
+        let fallback = await AppleMusicAPI.shared.searchAlbumsPublic(query: query, limit: limit, offset: offset)
+        if !fallback.isEmpty {
+            log("Album search is using Apple Music public search page.")
+        }
+        return fallback.map {
+            AppleMusicAlbumResult(
+                id: $0.id,
+                attributes: AppleMusicAlbumResultAttributes(
+                    name: $0.name,
+                    artistName: $0.artistName,
+                    artwork: $0.artwork
+                )
+            )
         }
     }
 
     private func searchPlaylists(query: String, limit: Int, offset: Int = 0) async -> [AppleMusicPlaylistResult] {
-        guard let token = await AppleMusicAPI.shared.getToken() else { return [] }
-
-        let region = UserDefaults.standard.string(forKey: "storeRegion")?.lowercased() ?? "us"
-        var components = URLComponents(string: "https://amp-api.music.apple.com/v1/catalog/\(region)/search")!
-        components.queryItems = [
-            URLQueryItem(name: "term", value: query),
-            URLQueryItem(name: "types", value: "playlists"),
-            URLQueryItem(name: "limit", value: String(limit)),
-            URLQueryItem(name: "offset", value: String(offset))
-        ]
-        guard let url = components.url else { return [] }
-
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("https://music.apple.com", forHTTPHeaderField: "Origin")
-
-        do {
-            let (data, _) = try await session.data(for: request)
-            let decoded = try JSONDecoder().decode(AppleMusicPlaylistSearchResponse.self, from: data)
-            if let playlists = decoded.results?.playlists?.data {
-                return playlists
-            }
-
-            if let firstError = decoded.errors?.first {
-                let summary = [firstError.status, firstError.code, firstError.title, firstError.detail]
-                    .compactMap { $0 }
-                    .joined(separator: " | ")
-                log("Playlist search returned no results: \(summary)")
-            } else if let payload = String(data: data.prefix(300), encoding: .utf8) {
-                log("Playlist search returned no results. Payload preview: \(payload)")
-            } else {
-                log("Playlist search returned no results.")
-            }
-            return []
-        } catch {
-            log("Playlist search failed: \(error.localizedDescription)")
-            return []
+        let fallback = await AppleMusicAPI.shared.searchPlaylistsPublic(query: query, limit: limit, offset: offset)
+        if !fallback.isEmpty {
+            log("Playlist search is using Apple Music public search page.")
+        }
+        return fallback.map {
+            AppleMusicPlaylistResult(
+                id: $0.id,
+                attributes: AppleMusicPlaylistAttributes(
+                    name: $0.name,
+                    curatorName: $0.curatorName,
+                    artwork: $0.artwork
+                ),
+                relationships: nil
+            )
         }
     }
 
@@ -5026,50 +6495,26 @@ final class DownloadViewModel: ObservableObject {
         }
     }
 
-    private func fetchAlbumTracks(albumID: String, fallbackAlbumName: String) async -> [DownloadTrack] {
-        guard let token = await AppleMusicAPI.shared.getToken() else { return [] }
-
+    private func fetchAlbumTracks(albumID: String, fallbackAlbumName: String, sourceURL: String? = nil) async -> [DownloadTrack] {
         let region = UserDefaults.standard.string(forKey: "storeRegion")?.lowercased() ?? "us"
-        var components = URLComponents(string: "https://amp-api.music.apple.com/v1/catalog/\(region)/albums/\(albumID)")!
-        components.queryItems = [
-            URLQueryItem(name: "include", value: "tracks")
-        ]
-        guard let url = components.url else { return [] }
 
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("https://music.apple.com", forHTTPHeaderField: "Origin")
-
-        do {
-            let (data, _) = try await session.data(for: request)
-            let decoded = try JSONDecoder().decode(AppleMusicAlbumDetailsResponse.self, from: data)
-            guard
-                let albumData = decoded.data.first,
-                let tracks = albumData.relationships?.tracks?.data
-            else {
-                return []
-            }
-
-            return tracks.map { item in
-                let songURL = item.attributes.url ?? "https://music.apple.com/\(region)/song/\(item.id)"
-                return DownloadTrack(
-                    id: item.id,
-                    name: item.attributes.name,
-                    artistLine: item.attributes.artistName,
-                    albumName: item.attributes.albumName ?? fallbackAlbumName,
-                    artworkURL: item.attributes.artwork?.artworkURL(width: 400, height: 400),
-                    isExplicit: item.attributes.contentRating == "explicit",
-                    sourceURL: songURL,
-                    sourceContext: .album,
-                    provider: .appleMusic,
-                    artistIdentifier: nil,
-                    albumIdentifier: albumID,
-                    previewURL: nil
-                )
-            }
-        } catch {
-            log("Album tracks fetch failed: \(error.localizedDescription)")
-            return []
+        let publicTracks = await AppleMusicAPI.shared.fetchAlbumTracksPublic(id: albumID, urlHint: sourceURL)
+        return publicTracks.map { item in
+            let songURL = item.attributes.url ?? "https://music.apple.com/\(region)/song/\(item.id)"
+            return DownloadTrack(
+                id: item.id,
+                name: item.attributes.name,
+                artistLine: item.attributes.artistName,
+                albumName: item.attributes.albumName ?? fallbackAlbumName,
+                artworkURL: item.attributes.artwork?.artworkURL(width: 400, height: 400),
+                isExplicit: item.attributes.contentRating == "explicit",
+                sourceURL: songURL,
+                sourceContext: .album,
+                provider: .appleMusic,
+                artistIdentifier: item.relationships?.artists?.data.first?.id,
+                albumIdentifier: item.relationships?.albums?.data.first?.id ?? albumID,
+                previewURL: nil
+            )
         }
     }
 
@@ -5294,6 +6739,592 @@ final class DownloadViewModel: ObservableObject {
         }
     }
 
+    private func fetchSpotifyToken() async -> String? {
+        guard let url = URL(string: "https://open.spotify.com/get_access_token?reason=transport&productType=web_player") else { return nil }
+        var request = URLRequest(url: url)
+        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
+                return nil
+            }
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let token = json["accessToken"] as? String {
+                return token
+            }
+        } catch {
+            log("Failed to fetch Spotify token: \(error.localizedDescription)")
+        }
+        return nil
+    }
+
+    private func fetchSpotifyTrack(id: String, sourceURL: String) async -> DownloadTrack? {
+        if let token = await fetchSpotifyToken() {
+            guard let url = URL(string: "https://api.spotify.com/v1/tracks/\(id)") else { return nil }
+            var request = URLRequest(url: url)
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            do {
+                let (data, response) = try await session.data(for: request)
+                if let http = response as? HTTPURLResponse, http.statusCode == 200,
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    
+                    let name = json["name"] as? String ?? "Unknown Title"
+                    let artists = json["artists"] as? [[String: Any]] ?? []
+                    let artistLine = artists.compactMap { $0["name"] as? String }.joined(separator: ", ")
+                    let album = json["album"] as? [String: Any]
+                    let albumName = album?["name"] as? String ?? "Unknown Album"
+                    let artworkURLString = (album?["images"] as? [[String: Any]])?.first?["url"] as? String
+                    let artworkURL = artworkURLString.flatMap(URL.init(string:))
+                    let explicit = json["explicit"] as? Bool ?? false
+                    let previewURLString = json["preview_url"] as? String
+                    let previewURL = previewURLString.flatMap(URL.init(string:))
+                    
+                    return DownloadTrack(
+                        id: id,
+                        name: name,
+                        artistLine: artistLine.isEmpty ? "Unknown Artist" : artistLine,
+                        albumName: albumName,
+                        artworkURL: artworkURL,
+                        isExplicit: explicit,
+                        sourceURL: sourceURL,
+                        sourceContext: .song,
+                        provider: .metadata,
+                        artistIdentifier: nil,
+                        albumIdentifier: album?["id"] as? String,
+                        previewURL: previewURL
+                    )
+                }
+            } catch {
+                log("Spotify API track fetch failed: \(error.localizedDescription)")
+            }
+        }
+        return await fetchSpotifyTrackFromPublicPage(sourceURL: sourceURL, fallbackID: id)
+    }
+
+    private func extractSpotifyJSONLD(in html: String) -> [String: Any]? {
+        let pattern = #"<script[^>]*type=["']application/ld\+json["'][^>]*>(.*?)</script>"#
+        guard let jsonString = firstRegexCapture(in: html, pattern: pattern, group: 1) else {
+            return nil
+        }
+        guard let data = jsonString.data(using: .utf8) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    private func fetchSpotifyTrackFromPublicPage(sourceURL: String, fallbackID: String) async -> DownloadTrack? {
+        guard let url = URL(string: sourceURL) else { return nil }
+        do {
+            let (data, response) = try await session.data(from: url)
+            try validateHTTP(response: response, data: data)
+            guard let html = String(data: data, encoding: .utf8), !html.isEmpty else { return nil }
+            
+            var title = "Unknown Title"
+            var artist = "Unknown Artist"
+            var albumName = "Unknown Album"
+            var artworkURL: URL?
+            
+            if let jsonld = extractSpotifyJSONLD(in: html) {
+                if let name = jsonld["name"] as? String {
+                    title = name
+                }
+                if let artists = jsonld["byArtist"] as? [[String: Any]] {
+                    artist = artists.compactMap { $0["name"] as? String }.joined(separator: ", ")
+                } else if let artistObj = jsonld["byArtist"] as? [String: Any] {
+                    artist = artistObj["name"] as? String ?? "Unknown Artist"
+                }
+                if let albumObj = jsonld["inAlbum"] as? [String: Any],
+                   let aName = albumObj["name"] as? String {
+                    albumName = aName
+                }
+                if let img = jsonld["image"] as? String {
+                    artworkURL = URL(string: img)
+                }
+            }
+            
+            if title == "Unknown Title" || artist == "Unknown Artist" || albumName == "Unknown Album" {
+                let ogTitle = extractHTMLMetaContent(property: "og:title", in: html) ??
+                              extractHTMLMetaContent(name: "twitter:title", in: html) ??
+                              extractHTMLTagContent(tag: "title", in: html)
+                
+                let ogDescription = extractHTMLMetaContent(property: "og:description", in: html) ??
+                                    extractHTMLMetaContent(name: "description", in: html)
+                
+                let artwork = extractHTMLMetaContent(property: "og:image", in: html)
+                
+                if title == "Unknown Title", let ogTitleClean = ogTitle {
+                    if let range = ogTitleClean.range(of: " - song", options: .caseInsensitive) {
+                        title = String(ogTitleClean[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    } else if let range = ogTitleClean.range(of: " - album", options: .caseInsensitive) {
+                        title = String(ogTitleClean[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    } else if ogTitleClean.contains("| Spotify") {
+                        title = ogTitleClean.replacingOccurrences(of: "| Spotify", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    } else {
+                        title = ogTitleClean
+                    }
+                }
+                
+                if let desc = ogDescription {
+                    let parts = desc.components(separatedBy: "·").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    if artist == "Unknown Artist", parts.count >= 1 {
+                        var rawArtist = parts[0]
+                        if rawArtist.hasPrefix("Listen to ") {
+                            rawArtist = rawArtist.replacingOccurrences(of: #"Listen to .*? on Spotify\.\s*"#, with: "", options: .regularExpression)
+                        }
+                        if !rawArtist.isEmpty {
+                            artist = rawArtist
+                        }
+                    }
+                    if albumName == "Unknown Album", parts.count >= 3 {
+                        let p1Lower = parts[1].lowercased()
+                        if p1Lower != "song" && p1Lower != "single" {
+                            let hasSongIndicator = parts.contains { $0.lowercased() == "song" || $0.lowercased() == "single" }
+                            if hasSongIndicator {
+                                albumName = parts[1]
+                            }
+                        }
+                    }
+                }
+                
+                if artist == "Unknown Artist", let ogTitleClean = ogTitle {
+                    if let byRange = ogTitleClean.range(of: "by ", options: .backwards) {
+                        let afterBy = ogTitleClean[byRange.upperBound...]
+                        let cleanArtist = afterBy.replacingOccurrences(of: "| Spotify", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !cleanArtist.isEmpty {
+                            artist = cleanArtist
+                        }
+                    }
+                }
+                
+                if artworkURL == nil {
+                    artworkURL = artwork.flatMap(URL.init(string:))
+                }
+            }
+            
+            return DownloadTrack(
+                id: fallbackID,
+                name: title,
+                artistLine: artist,
+                albumName: albumName,
+                artworkURL: artworkURL,
+                isExplicit: false,
+                sourceURL: sourceURL,
+                sourceContext: .song,
+                provider: .metadata,
+                artistIdentifier: nil,
+                albumIdentifier: nil,
+                previewURL: nil
+            )
+        } catch {
+            log("Spotify public page track fetch failed: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func fetchSpotifyAlbum(id: String, sourceURL: String) async -> (DownloadAlbum, [DownloadTrack])? {
+        if let token = await fetchSpotifyToken() {
+            guard let url = URL(string: "https://api.spotify.com/v1/albums/\(id)") else { return nil }
+            var albumRequest = URLRequest(url: url)
+            albumRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            do {
+                let (albumData, response) = try await session.data(for: albumRequest)
+                if let http = response as? HTTPURLResponse, http.statusCode == 200,
+                   let json = try? JSONSerialization.jsonObject(with: albumData) as? [String: Any] {
+                    
+                    let albumName = json["name"] as? String ?? "Unknown Album"
+                    let artists = json["artists"] as? [[String: Any]] ?? []
+                    let artistLine = artists.compactMap { $0["name"] as? String }.joined(separator: ", ")
+                    let artworkURLString = (json["images"] as? [[String: Any]])?.first?["url"] as? String
+                    let artworkURL = artworkURLString.flatMap(URL.init(string:))
+                    
+                    let albumResult = DownloadAlbum(
+                        id: id,
+                        name: albumName,
+                        artistLine: artistLine.isEmpty ? "Unknown Artist" : artistLine,
+                        artworkURL: artworkURL,
+                        sourceURL: sourceURL,
+                        provider: .metadata,
+                        artistIdentifier: nil,
+                        albumIdentifier: id
+                    )
+                    
+                    var tracks: [DownloadTrack] = []
+                    
+                    if let tracksContainer = json["tracks"] as? [String: Any],
+                       let items = tracksContainer["items"] as? [[String: Any]] {
+                        for item in items {
+                            if let trackID = item["id"] as? String {
+                                let trackName = item["name"] as? String ?? "Unknown Title"
+                                let trackArtists = item["artists"] as? [[String: Any]] ?? []
+                                let trackArtistLine = trackArtists.compactMap { $0["name"] as? String }.joined(separator: ", ")
+                                let explicit = item["explicit"] as? Bool ?? false
+                                let trackURL = "https://open.spotify.com/track/\(trackID)"
+                                
+                                tracks.append(DownloadTrack(
+                                    id: trackID,
+                                    name: trackName,
+                                    artistLine: trackArtistLine.isEmpty ? artistLine : trackArtistLine,
+                                    albumName: albumName,
+                                    artworkURL: artworkURL,
+                                    isExplicit: explicit,
+                                    sourceURL: trackURL,
+                                    sourceContext: .album,
+                                    provider: .metadata,
+                                    artistIdentifier: nil,
+                                    albumIdentifier: id,
+                                    previewURL: (item["preview_url"] as? String).flatMap(URL.init(string:))
+                                ))
+                            }
+                        }
+                    }
+                    
+                    return (albumResult, tracks)
+                }
+            } catch {
+                log("Spotify API album fetch failed: \(error.localizedDescription)")
+            }
+        }
+        return await fetchSpotifyAlbumFromPublicPage(sourceURL: sourceURL, fallbackID: id)
+    }
+
+    private func fetchSpotifyAlbumFromPublicPage(sourceURL: String, fallbackID: String) async -> (DownloadAlbum, [DownloadTrack])? {
+        if let embedURL = URL(string: "https://open.spotify.com/embed/album/\(fallbackID)") {
+            do {
+                let (data, response) = try await session.data(from: embedURL)
+                if let html = String(data: data, encoding: .utf8), !html.isEmpty,
+                   let parsed = parseSpotifyEmbedHTML(in: html, fallbackID: fallbackID, sourceURL: sourceURL, sourceContext: .album) {
+                    return parsed
+                }
+            } catch {
+                log("Spotify public page album embed fetch failed: \(error.localizedDescription)")
+            }
+        }
+
+        guard let url = URL(string: sourceURL) else { return nil }
+        do {
+            let (data, response) = try await session.data(from: url)
+            try validateHTTP(response: response, data: data)
+            guard let html = String(data: data, encoding: .utf8), !html.isEmpty else { return nil }
+            
+            var albumName = "Unknown Album"
+            var artistName = "Unknown Artist"
+            var artworkURL: URL?
+            
+            if let jsonld = extractSpotifyJSONLD(in: html) {
+                if let name = jsonld["name"] as? String {
+                    albumName = name
+                }
+                if let artists = jsonld["byArtist"] as? [[String: Any]] {
+                    artistName = artists.compactMap { $0["name"] as? String }.joined(separator: ", ")
+                } else if let artistObj = jsonld["byArtist"] as? [String: Any] {
+                    artistName = artistObj["name"] as? String ?? "Unknown Artist"
+                }
+                if let img = jsonld["image"] as? String {
+                    artworkURL = URL(string: img)
+                }
+            }
+            
+            if albumName == "Unknown Album" || artistName == "Unknown Artist" || artworkURL == nil {
+                let ogTitle = extractHTMLMetaContent(property: "og:title", in: html) ??
+                              extractHTMLMetaContent(name: "twitter:title", in: html) ??
+                              extractHTMLTagContent(tag: "title", in: html)
+                
+                let ogDescription = extractHTMLMetaContent(property: "og:description", in: html) ??
+                                    extractHTMLMetaContent(name: "description", in: html)
+                
+                let artwork = extractHTMLMetaContent(property: "og:image", in: html)
+                
+                if let ogTitleClean = ogTitle {
+                    albumName = ogTitleClean.replacingOccurrences(of: "| Spotify", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let range = albumName.range(of: " - album", options: .caseInsensitive) {
+                        albumName = String(albumName[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                }
+                
+                if let desc = ogDescription {
+                    let parts = desc.components(separatedBy: "·").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    if parts.count >= 1 {
+                        var rawArtist = parts[0]
+                        if rawArtist.hasPrefix("Listen to ") {
+                            rawArtist = rawArtist.replacingOccurrences(of: #"Listen to .*? on Spotify\.\s*"#, with: "", options: .regularExpression)
+                        }
+                        if !rawArtist.isEmpty {
+                            artistName = rawArtist
+                        }
+                    }
+                }
+                
+                if artworkURL == nil {
+                    artworkURL = artwork.flatMap(URL.init(string:))
+                }
+            }
+            
+            let albumResult = DownloadAlbum(
+                id: fallbackID,
+                name: albumName,
+                artistLine: artistName,
+                artworkURL: artworkURL,
+                sourceURL: sourceURL,
+                provider: .metadata,
+                artistIdentifier: nil,
+                albumIdentifier: fallbackID
+            )
+            
+            let tracks = extractSpotifyTracksFromHTML(in: html, fallbackArtist: artistName, fallbackAlbumName: albumName, artworkURL: artworkURL, sourceContext: .album)
+            let finalTracks = tracks.isEmpty ? [
+                DownloadTrack(
+                    id: fallbackID,
+                    name: albumName,
+                    artistLine: artistName,
+                    albumName: albumName,
+                    artworkURL: artworkURL,
+                    isExplicit: false,
+                    sourceURL: sourceURL,
+                    sourceContext: .album,
+                    provider: .metadata,
+                    artistIdentifier: nil,
+                    albumIdentifier: fallbackID,
+                    previewURL: nil
+                )
+            ] : tracks
+            return (albumResult, finalTracks)
+        } catch {
+            log("Spotify public page album failed: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func fetchSpotifyPlaylistFromPublicPage(sourceURL: String, fallbackID: String) async -> (DownloadAlbum, [DownloadTrack])? {
+        if let embedURL = URL(string: "https://open.spotify.com/embed/playlist/\(fallbackID)") {
+            do {
+                let (data, response) = try await session.data(from: embedURL)
+                if let html = String(data: data, encoding: .utf8), !html.isEmpty,
+                   let parsed = parseSpotifyEmbedHTML(in: html, fallbackID: fallbackID, sourceURL: sourceURL, sourceContext: .song) {
+                    var enrichedAlbum = parsed.album
+                    let creator = parsed.album.artistLine
+                    let trackCount = parsed.tracks.count
+                    let desc = "Playlist • \(creator) • \(trackCount) items"
+                    enrichedAlbum = DownloadAlbum(
+                        id: enrichedAlbum.id,
+                        name: enrichedAlbum.name,
+                        artistLine: desc,
+                        artworkURL: enrichedAlbum.artworkURL,
+                        sourceURL: enrichedAlbum.sourceURL,
+                        provider: enrichedAlbum.provider,
+                        artistIdentifier: enrichedAlbum.artistIdentifier,
+                        albumIdentifier: enrichedAlbum.albumIdentifier
+                    )
+                    return (enrichedAlbum, parsed.tracks)
+                }
+            } catch {
+                log("Spotify public page playlist embed fetch failed: \(error.localizedDescription)")
+            }
+        }
+
+        guard let url = URL(string: sourceURL) else { return nil }
+        do {
+            let (data, response) = try await session.data(from: url)
+            try validateHTTP(response: response, data: data)
+            guard let html = String(data: data, encoding: .utf8), !html.isEmpty else { return nil }
+            
+            var playlistName = "Unknown Playlist"
+            var description = "Spotify Playlist"
+            var artworkURL: URL?
+            
+            if let jsonld = extractSpotifyJSONLD(in: html) {
+                if let name = jsonld["name"] as? String {
+                    playlistName = name
+                }
+                if let desc = jsonld["description"] as? String {
+                    description = desc
+                }
+                if let img = jsonld["image"] as? String {
+                    artworkURL = URL(string: img)
+                }
+            }
+            
+            if playlistName == "Unknown Playlist" || artworkURL == nil {
+                let ogTitle = extractHTMLMetaContent(property: "og:title", in: html) ??
+                              extractHTMLMetaContent(name: "twitter:title", in: html) ??
+                              extractHTMLTagContent(tag: "title", in: html)
+                
+                let ogDescription = extractHTMLMetaContent(property: "og:description", in: html) ??
+                                    extractHTMLMetaContent(name: "description", in: html)
+                
+                let artwork = extractHTMLMetaContent(property: "og:image", in: html)
+                
+                if playlistName == "Unknown Playlist", let ogTitleClean = ogTitle {
+                    playlistName = ogTitleClean.replacingOccurrences(of: "| Spotify", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                if description == "Spotify Playlist", let desc = ogDescription {
+                    description = desc
+                }
+                if artworkURL == nil {
+                    artworkURL = artwork.flatMap(URL.init(string:))
+                }
+            }
+            
+            let playlistResult = DownloadAlbum(
+                id: fallbackID,
+                name: playlistName,
+                artistLine: description,
+                artworkURL: artworkURL,
+                sourceURL: sourceURL,
+                provider: .metadata,
+                artistIdentifier: nil,
+                albumIdentifier: fallbackID
+            )
+            
+            let tracks = extractSpotifyTracksFromHTML(in: html, fallbackArtist: "Unknown Artist", fallbackAlbumName: playlistName, artworkURL: artworkURL, sourceContext: .song)
+            return (playlistResult, tracks)
+        } catch {
+            log("Spotify public page playlist fetch failed: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func fetchSpotifyArtistFromPublicPage(sourceURL: String, fallbackID: String) async -> DownloadArtist? {
+        guard let url = URL(string: sourceURL) else { return nil }
+        do {
+            let (data, response) = try await session.data(from: url)
+            try validateHTTP(response: response, data: data)
+            guard let html = String(data: data, encoding: .utf8), !html.isEmpty else { return nil }
+            
+            var artistName = "Unknown Artist"
+            var artworkURL: URL?
+            
+            if let jsonld = extractSpotifyJSONLD(in: html) {
+                if let name = jsonld["name"] as? String {
+                    artistName = name
+                }
+                if let img = jsonld["image"] as? String {
+                    artworkURL = URL(string: img)
+                }
+            }
+            
+            if artistName == "Unknown Artist" {
+                let ogTitle = extractHTMLMetaContent(property: "og:title", in: html) ??
+                              extractHTMLMetaContent(name: "twitter:title", in: html) ??
+                              extractHTMLTagContent(tag: "title", in: html)
+                
+                let artwork = extractHTMLMetaContent(property: "og:image", in: html)
+                
+                if let ogTitleClean = ogTitle {
+                    artistName = ogTitleClean.replacingOccurrences(of: "| Spotify", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                if artworkURL == nil {
+                    artworkURL = artwork.flatMap(URL.init(string:))
+                }
+            }
+            
+            return DownloadArtist(
+                id: fallbackID,
+                name: artistName,
+                provider: .metadata,
+                artworkURL: artworkURL
+            )
+        } catch {
+            log("Spotify public page artist fetch failed: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func fetchSpotifyPlaylist(id: String, sourceURL: String) async -> (DownloadAlbum, [DownloadTrack])? {
+        if let token = await fetchSpotifyToken() {
+            guard let url = URL(string: "https://api.spotify.com/v1/playlists/\(id)") else { return nil }
+            var playlistRequest = URLRequest(url: url)
+            playlistRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            do {
+                let (playlistData, response) = try await session.data(for: playlistRequest)
+                if let http = response as? HTTPURLResponse, http.statusCode == 200,
+                   let json = try? JSONSerialization.jsonObject(with: playlistData) as? [String: Any] {
+                    
+                    let playlistName = json["name"] as? String ?? "Unknown Playlist"
+                    let description = json["description"] as? String ?? "Spotify Playlist"
+                    let artworkURLString = (json["images"] as? [[String: Any]])?.first?["url"] as? String
+                    let artworkURL = artworkURLString.flatMap(URL.init(string:))
+                    
+                    let playlistResult = DownloadAlbum(
+                        id: id,
+                        name: playlistName,
+                        artistLine: description,
+                        artworkURL: artworkURL,
+                        sourceURL: sourceURL,
+                        provider: .metadata,
+                        artistIdentifier: nil,
+                        albumIdentifier: id
+                    )
+                    
+                    var tracks: [DownloadTrack] = []
+                    
+                    if let tracksContainer = json["tracks"] as? [String: Any],
+                       let items = tracksContainer["items"] as? [[String: Any]] {
+                        for item in items {
+                            if let track = item["track"] as? [String: Any],
+                               let trackID = track["id"] as? String {
+                                let trackName = track["name"] as? String ?? "Unknown Title"
+                                let trackArtists = track["artists"] as? [[String: Any]] ?? []
+                                let trackArtistLine = trackArtists.compactMap { $0["name"] as? String }.joined(separator: ", ")
+                                let explicit = track["explicit"] as? Bool ?? false
+                                let trackURL = "https://open.spotify.com/track/\(trackID)"
+                                let trackAlbum = track["album"] as? [String: Any]
+                                let trackAlbumName = trackAlbum?["name"] as? String ?? "Unknown Album"
+                                let trackArtworkURLString = (trackAlbum?["images"] as? [[String: Any]])?.first?["url"] as? String
+                                let trackArtworkURL = trackArtworkURLString.flatMap(URL.init(string:))
+                                
+                                tracks.append(DownloadTrack(
+                                    id: trackID,
+                                    name: trackName,
+                                    artistLine: trackArtistLine.isEmpty ? "Unknown Artist" : trackArtistLine,
+                                    albumName: trackAlbumName,
+                                    artworkURL: trackArtworkURL ?? artworkURL,
+                                    isExplicit: explicit,
+                                    sourceURL: trackURL,
+                                    sourceContext: .song,
+                                    provider: .metadata,
+                                    artistIdentifier: nil,
+                                    albumIdentifier: trackAlbum?["id"] as? String,
+                                    previewURL: (track["preview_url"] as? String).flatMap(URL.init(string:))
+                                ))
+                            }
+                        }
+                    }
+                    
+                    return (playlistResult, tracks)
+                }
+            } catch {
+                log("Spotify API playlist fetch failed: \(error.localizedDescription)")
+            }
+        }
+        return await fetchSpotifyPlaylistFromPublicPage(sourceURL: sourceURL, fallbackID: id)
+    }
+
+    private func fetchSpotifyArtist(id: String, sourceURL: String) async -> DownloadArtist? {
+        if let token = await fetchSpotifyToken() {
+            guard let url = URL(string: "https://api.spotify.com/v1/artists/\(id)") else { return nil }
+            var artistRequest = URLRequest(url: url)
+            artistRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            do {
+                let (artistData, response) = try await session.data(for: artistRequest)
+                if let http = response as? HTTPURLResponse, http.statusCode == 200,
+                   let json = try? JSONSerialization.jsonObject(with: artistData) as? [String: Any] {
+                    
+                    let name = json["name"] as? String ?? "Unknown Artist"
+                    let artworkURLString = (json["images"] as? [[String: Any]])?.first?["url"] as? String
+                    let artworkURL = artworkURLString.flatMap(URL.init(string:))
+                    
+                    return DownloadArtist(
+                        id: id,
+                        name: name,
+                        provider: .metadata,
+                        artworkURL: artworkURL
+                    )
+                }
+            } catch {
+                log("Spotify API artist fetch failed: \(error.localizedDescription)")
+            }
+        }
+        return await fetchSpotifyArtistFromPublicPage(sourceURL: sourceURL, fallbackID: id)
+    }
+
     private func tidalBaseURLCandidates() async -> [String] {
         var candidates: [String] = []
 
@@ -5440,6 +7471,138 @@ final class DownloadViewModel: ObservableObject {
         return value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private func regexMatches(in text: String, pattern: String, group: Int) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else {
+            return []
+        }
+        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        return matches.compactMap { match in
+            guard group < match.numberOfRanges,
+                  let range = Range(match.range(at: group), in: text) else {
+                return nil
+            }
+            return String(text[range])
+        }
+    }
+
+    private func extractSpotifyTracksFromHTML(in html: String, fallbackArtist: String, fallbackAlbumName: String, artworkURL: URL?, sourceContext: DownloadTrack.SourceContext) -> [DownloadTrack] {
+        var tracks: [DownloadTrack] = []
+        let segments = html.components(separatedBy: "data-testid=\"track-row\"")
+        guard segments.count > 1 else { return [] }
+        
+        for segment in segments.dropFirst() {
+            // Extract track ID
+            guard let trackID = firstRegexCapture(in: segment, pattern: #"href=["']/track/([a-zA-Z0-9]+)["']"#, group: 1) else {
+                continue
+            }
+            // Extract track title
+            guard let title = firstRegexCapture(in: segment, pattern: #"<span[^>]*>([^<]+)</span>"#, group: 1) else {
+                continue
+            }
+            
+            // Extract artists: find all href="/artist/[a-zA-Z0-9]+" links and get their content
+            let artistPattern = #"href=["']/artist/[a-zA-Z0-9]+["'][^>]*>([^<]+)</a>"#
+            let artistNames = regexMatches(in: segment, pattern: artistPattern, group: 1)
+            let artistLine = artistNames.joined(separator: ", ")
+            
+            let trackURL = "https://open.spotify.com/track/\(trackID)"
+            
+            tracks.append(
+                DownloadTrack(
+                    id: trackID,
+                    name: htmlDecoded(title),
+                    artistLine: artistLine.isEmpty ? fallbackArtist : htmlDecoded(artistLine),
+                    albumName: fallbackAlbumName,
+                    artworkURL: artworkURL,
+                    isExplicit: false,
+                    sourceURL: trackURL,
+                    sourceContext: sourceContext,
+                    provider: .metadata,
+                    artistIdentifier: nil,
+                    albumIdentifier: nil,
+                    previewURL: nil
+                )
+            )
+        }
+        return tracks
+    }
+
+    private func parseSpotifyEmbedHTML(in html: String, fallbackID: String, sourceURL: String, sourceContext: DownloadTrack.SourceContext) -> (album: DownloadAlbum, tracks: [DownloadTrack])? {
+        let pattern = #"<script[^>]*id=["']__NEXT_DATA__["'][^>]*>(.*?)</script>"#
+        guard let jsonString = firstRegexCapture(in: html, pattern: pattern, group: 1),
+              let data = jsonString.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let props = json["props"] as? [String: Any],
+              let pageProps = props["pageProps"] as? [String: Any],
+              let state = pageProps["state"] as? [String: Any],
+              let stateData = state["data"] as? [String: Any],
+              let entity = stateData["entity"] as? [String: Any] else {
+            return nil
+        }
+        
+        let entityName = entity["name"] as? String ?? entity["title"] as? String ?? "Unknown Name"
+        let subtitle = entity["subtitle"] as? String ?? ""
+        
+        var artworkURL: URL?
+        if let coverArt = entity["coverArt"] as? [String: Any],
+           let sources = coverArt["sources"] as? [[String: Any]],
+           let firstSource = sources.first,
+           let urlStr = firstSource["url"] as? String {
+            artworkURL = URL(string: urlStr)
+        }
+        
+        let albumResult = DownloadAlbum(
+            id: fallbackID,
+            name: entityName,
+            artistLine: subtitle.isEmpty ? (sourceContext == .album ? "Unknown Artist" : "Spotify Playlist") : subtitle,
+            artworkURL: artworkURL,
+            sourceURL: sourceURL,
+            provider: .metadata,
+            artistIdentifier: nil,
+            albumIdentifier: fallbackID
+        )
+        
+        var parsedTracks: [DownloadTrack] = []
+        if let trackList = entity["trackList"] as? [[String: Any]] {
+            for trackObj in trackList {
+                let uri = trackObj["uri"] as? String ?? ""
+                let trackID: String
+                if uri.hasPrefix("spotify:track:") {
+                    trackID = String(uri.dropFirst("spotify:track:".count))
+                } else {
+                    continue
+                }
+                
+                let title = trackObj["title"] as? String ?? "Unknown Title"
+                let artists = trackObj["subtitle"] as? String ?? ""
+                let explicit = trackObj["isExplicit"] as? Bool ?? false
+                let trackURL = "https://open.spotify.com/track/\(trackID)"
+                
+                let previewURLString = (trackObj["audioPreview"] as? [String: Any])?["url"] as? String
+                let previewURL = previewURLString.flatMap(URL.init(string:))
+                
+                parsedTracks.append(
+                    DownloadTrack(
+                        id: trackID,
+                        name: htmlDecoded(title),
+                        artistLine: artists.isEmpty ? (subtitle.isEmpty ? "Unknown Artist" : subtitle) : htmlDecoded(artists),
+                        albumName: sourceContext == .album ? entityName : "Unknown Album",
+                        artworkURL: artworkURL,
+                        isExplicit: explicit,
+                        sourceURL: trackURL,
+                        sourceContext: sourceContext,
+                        provider: .metadata,
+                        artistIdentifier: nil,
+                        albumIdentifier: sourceContext == .album ? fallbackID : nil,
+                        previewURL: previewURL
+                    )
+                )
+            }
+        }
+        
+        return (albumResult, parsedTracks)
+    }
+
     private func preferredTidalBaseURL() async -> String? {
         if let activeTidalSearchHost {
             return activeTidalSearchHost.replacingOccurrences(of: "/search/", with: "")
@@ -5491,6 +7654,66 @@ final class DownloadViewModel: ObservableObject {
 
     private func log(_ message: String) {
         Logger.shared.log("[Download] \(message)")
+    }
+
+    private func restorePersistedQueue() {
+        guard let snapshot = QueuePersistenceStore.loadDownloadQueue() else { return }
+
+        let restoredTracks = snapshot.tracksByID.compactMapValues(\.downloadTrack)
+        guard !restoredTracks.isEmpty else {
+            QueuePersistenceStore.clearDownloadQueue()
+            return
+        }
+
+        knownTracksByID = restoredTracks
+        queueOrder = snapshot.queueOrder.filter { restoredTracks[$0] != nil }
+        totalQueueCount = snapshot.totalQueueCount
+        completedQueueCount = snapshot.completedQueueCount
+
+        for id in snapshot.failedIDs where restoredTracks[id] != nil {
+            trackStates[id] = .failed
+        }
+
+        let activeAsQueued = snapshot.activeID.map { [$0] } ?? []
+        let pendingIDs = (activeAsQueued + snapshot.pendingIDs).filter { restoredTracks[$0] != nil }
+        pendingQueue = pendingIDs.compactMap { id in
+            trackStates[id] = .queued
+            return restoredTracks[id]
+        }
+
+        if totalQueueCount == 0 && (!pendingQueue.isEmpty || !snapshot.failedIDs.isEmpty) {
+            totalQueueCount = pendingQueue.count + snapshot.failedIDs.count
+        }
+        completedQueueCount = min(completedQueueCount, totalQueueCount)
+
+        if !pendingQueue.isEmpty {
+            log("Restored \(pendingQueue.count) queued download(s) from last session.")
+            Task { await processQueueIfNeeded() }
+        } else if !snapshot.failedIDs.isEmpty {
+            log("Restored \(snapshot.failedIDs.count) failed download(s) from last session.")
+        }
+    }
+
+    private func syncQueuePersistence() {
+        let failedIDs = queueOrder.filter { trackStates[$0] == .failed }
+        let pendingIDs = pendingQueue.map(\.id)
+        let hasMeaningfulState = !pendingIDs.isEmpty || activeDownloadTrackID != nil || !failedIDs.isEmpty
+
+        guard hasMeaningfulState else {
+            QueuePersistenceStore.clearDownloadQueue()
+            return
+        }
+
+        let snapshot = PersistedDownloadQueue(
+            tracksByID: knownTracksByID.mapValues(PersistedDownloadTrack.init),
+            queueOrder: queueOrder,
+            pendingIDs: pendingIDs,
+            failedIDs: failedIDs,
+            activeID: activeDownloadTrackID,
+            totalQueueCount: totalQueueCount,
+            completedQueueCount: completedQueueCount
+        )
+        QueuePersistenceStore.saveDownloadQueue(snapshot)
     }
 
     func queueSnapshot() -> DownloadQueueSnapshot {
@@ -5567,9 +7790,75 @@ struct DownloadQueueDetailsSheet: View {
                             progress: snapshot.currentSongProgress,
                             label: snapshot.queueCounterText
                         )
-                        VStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading, spacing: 4) {
                             Text("Download Queue")
                                 .font(.headline)
+                            
+                            HStack(spacing: 8) {
+                                if vm.isPaused {
+                                    Button {
+                                        vm.resumeQueue()
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "play.fill")
+                                                .font(.caption)
+                                            Text("Resume")
+                                                .font(.caption.weight(.semibold))
+                                        }
+                                        .foregroundColor(.green)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 5)
+                                        .background(
+                                            Capsule()
+                                                .stroke(Color.green.opacity(0.4), lineWidth: 1)
+                                                .background(Color.green.opacity(0.08).clipShape(Capsule()))
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                } else if vm.shouldShowPauseButton {
+                                    Button {
+                                        vm.pauseQueue()
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "pause.fill")
+                                                .font(.caption)
+                                            Text("Pause")
+                                                .font(.caption.weight(.semibold))
+                                        }
+                                        .foregroundColor(.accentColor)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 5)
+                                        .background(
+                                            Capsule()
+                                                .stroke(Color.accentColor.opacity(0.4), lineWidth: 1)
+                                                .background(Color.accentColor.opacity(0.08).clipShape(Capsule()))
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                
+                                if vm.shouldShowCancelButton {
+                                    Button {
+                                        vm.cancelQueue()
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "xmark.circle.fill")
+                                                .font(.caption)
+                                            Text("Cancel All")
+                                                .font(.caption.weight(.semibold))
+                                        }
+                                        .foregroundColor(.red)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 5)
+                                        .background(
+                                            Capsule()
+                                                .stroke(Color.red.opacity(0.4), lineWidth: 1)
+                                                .background(Color.red.opacity(0.08).clipShape(Capsule()))
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
                         }
                     }
                     .padding(.vertical, 4)
@@ -5614,6 +7903,12 @@ struct DownloadQueueDetailsSheet: View {
                         ForEach(snapshot.queuedItems) { item in
                             queueRow(item)
                         }
+                        .onDelete { offsets in
+                            let items = snapshot.queuedItems
+                            for index in offsets {
+                                vm.removeQueued(trackID: items[index].id)
+                            }
+                        }
                     }
                 }
 
@@ -5629,6 +7924,12 @@ struct DownloadQueueDetailsSheet: View {
                     Section("Failed") {
                         ForEach(snapshot.failedItems) { item in
                             queueRow(item)
+                        }
+                        .onDelete { offsets in
+                            let items = snapshot.failedItems
+                            for index in offsets {
+                                vm.removeFailed(trackID: items[index].id)
+                            }
                         }
                     }
                 }
@@ -5713,6 +8014,7 @@ private final class ProgressiveDataFetcher: NSObject, URLSessionDataDelegate {
     private var lastSampleAt: CFAbsoluteTime = 0
     private var lastSampleBytes: Int = 0
     private var smoothedSpeedBps: Double = 0
+    private var task: URLSessionDataTask?
 
     func fetch(
         request: URLRequest,
@@ -5735,10 +8037,15 @@ private final class ProgressiveDataFetcher: NSObject, URLSessionDataDelegate {
         let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
         self.session = session
 
-        return try await withCheckedThrowingContinuation { cont in
-            continuation = cont
-            let task = session.dataTask(with: request)
-            task.resume()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { cont in
+                continuation = cont
+                let task = session.dataTask(with: request)
+                self.task = task
+                task.resume()
+            }
+        } onCancel: {
+            self.task?.cancel()
         }
     }
 
