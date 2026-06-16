@@ -24,7 +24,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		BB302E1A2F0D69FD00BB151F /* MusicManager.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MusicManager.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		BB302E1A2F0D69FD00BB151F /* ByeTunes.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ByeTunes.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB302E272F0D69FF00BB151F /* MusicManagerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MusicManagerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB302E312F0D69FF00BB151F /* MusicManagerUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MusicManagerUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -98,7 +98,7 @@
 		BB302E1B2F0D69FD00BB151F /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				BB302E1A2F0D69FD00BB151F /* MusicManager.app */,
+				BB302E1A2F0D69FD00BB151F /* ByeTunes.app */,
 				BB302E272F0D69FF00BB151F /* MusicManagerTests.xctest */,
 				BB302E312F0D69FF00BB151F /* MusicManagerUITests.xctest */,
 			);
@@ -126,8 +126,8 @@
 			name = MusicManager;
 			packageProductDependencies = (
 			);
-			productName = MusicManager;
-			productReference = BB302E1A2F0D69FD00BB151F /* MusicManager.app */;
+			productName = ByeTunes;
+			productReference = BB302E1A2F0D69FD00BB151F /* ByeTunes.app */;
 			productType = "com.apple.product-type.application";
 		};
 		BB302E262F0D69FF00BB151F /* MusicManagerTests */ = {
@@ -435,7 +435,8 @@
 				);
 				MARKETING_VERSION = 2.3;
 				PRODUCT_BUNDLE_IDENTIFIER = com.EduAlexxis.MusicManager;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				EXECUTABLE_PREFIX = "";
+				PRODUCT_NAME = ByeTunes;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -478,7 +479,8 @@
 				);
 				MARKETING_VERSION = 2.3;
 				PRODUCT_BUNDLE_IDENTIFIER = com.EduAlexxis.MusicManager;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				EXECUTABLE_PREFIX = "";
+				PRODUCT_NAME = ByeTunes;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
