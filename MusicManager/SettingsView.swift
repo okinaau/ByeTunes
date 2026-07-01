@@ -1091,6 +1091,23 @@ struct SettingsView: View {
         .sheet(isPresented: $showingLogViewer) {
             LogViewer()
         }
+         .alert("Export Playlist", isPresented: $showingPlaylistNameAlert) {
+            TextField("Playlist Name", text: $playlistNameToExport)
+            Button("Cancel", role: .cancel) { }
+            Button("Export") {
+                exportM3UPlaylist(name: playlistNameToExport)
+            }
+        } message: {
+            Text("Enter the exact name of the playlist you want to export.")
+        }
+        .sheet(isPresented: $showingM3UImportPicker) {
+            DocumentPicker(types: [.data, .item]) { url in
+                importM3UPlaylist(url: url)
+            }
+        }
+        .sheet(isPresented: $showingM3UExportSheet) {
+            LogShareSheet(activityItems: m3uExportURLs)
+        }
         .sheet(isPresented: $showingDbExportSheet) {
             LogShareSheet(activityItems: exportedDbURLs)
         }
@@ -2197,4 +2214,84 @@ struct FlowLayout: Layout {
             rowHeight = max(rowHeight, size.height)
         }
     }
+    private func exportM3UPlaylist(name: String) {
+    guard !name.isEmpty else { return }
+    isProcessingM3U = true
+
+    let tmp = FileManager.default.temporaryDirectory
+    let localDBURL = tmp.appendingPathComponent("TempExportDB-\(UUID().uuidString).sqlitedb")
+
+    // 1. Pull the live database from the device over the tunnel
+    manager.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb", localURL: localDBURL) { success in
+        guard success, let dbData = try? Data(contentsOf: localDBURL) else {
+            DispatchQueue.main.async {
+                self.isProcessingM3U = false
+                self.showToastMessage(title: "Failed to read database", icon: "xmark.circle.fill")
+            }
+            return
+        }
+
+        // 2. Feed it into our new Exporter logic
+        do {
+            let exportURL = tmp.appendingPathComponent("\(name).m3u8")
+            try PlaylistExporter.exportPlaylist(existingDbData: dbData, playlistName: name, toFileURL: exportURL)
+
+            DispatchQueue.main.async {
+                self.isProcessingM3U = false
+                self.m3uExportURLs = [exportURL]
+                self.showingM3UExportSheet = true // Triggers the iOS share sheet to save the file
+            }
+        } catch {
+            DispatchQueue.main.async {
+                self.isProcessingM3U = false
+                self.showToastMessage(title: "Export Failed: \(error.localizedDescription)", icon: "xmark.circle.fill")
+            }
+        }
+    }
+}
+
+private func importM3UPlaylist(url: URL?) {
+    guard let url = url else { return }
+    isProcessingM3U = true
+
+    let tmp = FileManager.default.temporaryDirectory
+    let localDBURL = tmp.appendingPathComponent("TempImportDB-\(UUID().uuidString).sqlitedb")
+
+    // 1. Pull the live database to get the newly injected song signatures
+    manager.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb", localURL: localDBURL) { success in
+        guard success, let dbData = try? Data(contentsOf: localDBURL) else {
+            DispatchQueue.main.async {
+                self.isProcessingM3U = false
+                self.showToastMessage(title: "Failed to read database", icon: "xmark.circle.fill")
+            }
+            return
+        }
+
+        // 2. Re-assemble the playlist in the local DB copy
+        do {
+            let result = try PlaylistExporter.importPlaylist(existingDbData: dbData, fromFileURL: url, playlistName: nil)
+
+            let updatedDBURL = tmp.appendingPathComponent("UpdatedMediaLibrary-\(UUID().uuidString).sqlitedb")
+            try result.updatedDbData.write(to: updatedDBURL)
+
+            // 3. Push the modified database back to the device
+            // ⚠️ CHECK DEVICEMANAGER.SWIFT: Replace 'uploadFileToDevice' with the actual function name ByeTunes uses.
+            manager.uploadFileToDevice(localURL: updatedDBURL, remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb") { pushSuccess in
+                DispatchQueue.main.async {
+                    self.isProcessingM3U = false
+                    if pushSuccess {
+                        self.showToastMessage(title: "Imported \(result.matchedCount) tracks", icon: "checkmark.circle.fill")
+                    } else {
+                        self.showToastMessage(title: "Failed to push database back", icon: "xmark.circle.fill")
+                    }
+                }
+            }
+        } catch {
+            DispatchQueue.main.async {
+                self.isProcessingM3U = false
+                self.showToastMessage(title: "Import Failed: \(error.localizedDescription)", icon: "xmark.circle.fill")
+            }
+        }
+    }
+}
 }
