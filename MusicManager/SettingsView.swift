@@ -23,6 +23,12 @@ struct SettingsView: View {
     @State private var snapshotProgress: Double? = nil
     @State private var isFixingArtwork = false
     @State private var isRebuildingAlbumArtwork = false
+    @State private var showingM3UImportPicker = false
+    @State private var showingPlaylistNameAlert = false
+    @State private var playlistNameToExport = ""
+    @State private var m3uExportURLs: [URL] = []
+    @State private var showingM3UExportSheet = false
+    @State private var isProcessingM3U = false
     @State private var artworkFixMessage = "Fixing artwork..."
     @State private var artworkFixProgress: Double? = nil
     @State private var snapshots: [DeviceManager.DatabaseSnapshotInfo] = []
