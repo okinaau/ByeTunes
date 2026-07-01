@@ -548,7 +548,7 @@ class MediaLibraryBuilder {
     }
     
     
-    private static func getExistingSongSignatures(db: OpaquePointer?) -> [String: Int64] {
+    static func getExistingSongSignatures(db: OpaquePointer?) -> [String: Int64] {
         var signatures: [String: Int64] = [:]
         var stmt: OpaquePointer?
         
