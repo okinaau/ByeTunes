@@ -91,6 +91,27 @@ jobs:
           cp "${{ steps.idevice_files.outputs.header }}" ByeTunes/MusicManager/idevice.h
           ls -la ByeTunes/MusicManager/
 
+      - name: Diagnose MediaLibraryBuilder dependency
+        working-directory: ByeTunes
+        run: |
+          echo "--- Files/folders mentioning MediaLibraryBuilder ---"
+          grep -rl "MediaLibraryBuilder" . \
+            --include="*.swift" --include="*.pbxproj" --include="Podfile*" --include="Package.swift" \
+            || echo "(no text matches found)"
+          echo ""
+          echo "--- Any folder/file literally named *MediaLibrary* ---"
+          find . -iname "*MediaLibrary*" || true
+          echo ""
+          echo "--- Swift Package references declared in the project ---"
+          grep -B2 -A6 "XCLocalSwiftPackageReference\|XCRemoteSwiftPackageReference" \
+            MusicManager.xcodeproj/project.pbxproj || echo "(none found)"
+          echo ""
+          echo "--- Podfile present? ---"
+          ls -la | grep -i pod || echo "(no Podfile)"
+          echo ""
+          echo "--- All targets in the project ---"
+          xcodebuild -list -project MusicManager.xcodeproj
+
       - name: Create bridging header
         # Per the README, the project expects a Bridging-Header.h that imports
         # idevice.h, but this file (like the library/header) isn't committed to
