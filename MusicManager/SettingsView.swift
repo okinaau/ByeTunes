@@ -722,6 +722,57 @@ struct SettingsView: View {
                                     .foregroundColor(.primary)
                                 
                                 Spacer()
+                                Divider().padding(.leading, 56)
+
+                                Button {
+                                    playlistNameToExport = ""
+                                    showingPlaylistNameAlert = true
+                                } label: {
+                                    HStack {
+                                        if isProcessingM3U {
+                                            ProgressView()
+                                                .frame(width: 28)
+                                        } else {
+                                            Image(systemName: "square.and.arrow.up.fill")
+                                                .font(.body)
+                                                .foregroundColor(.primary)
+                                                .frame(width: 28)
+                                        }
+
+                                        Text(isProcessingM3U ? "Working…" : "Export Playlist (.m3u8)")
+                                            .font(.body)
+                                            .foregroundColor(.primary)
+
+                                        Spacer()
+                                    }
+                                    .padding(.vertical, 14)
+                                    .padding(.horizontal, 16)
+                                }
+                                .disabled(isProcessingM3U || !manager.heartbeatReady)
+
+                                Divider().padding(.leading, 56)
+
+                                Button {
+                                    showingM3UImportPicker = true
+                                } label: {
+                                    HStack {
+                                        if isProcessingM3U {
+                                            ProgressView().frame(width: 28)
+                                        } else {
+                                            Image(systemName: "square.and.arrow.down.fill")
+                                                .font(.body)
+                                                .foregroundColor(.primary)
+                                                .frame(width: 28)
+                                        }
+                                        Text(isProcessingM3U ? "Working…" : "Import Playlist (.m3u8)")
+                                            .font(.body)
+                                            .foregroundColor(.primary)
+                                        Spacer()
+                                    }
+                                    .padding(.vertical, 14)
+                                    .padding(.horizontal, 16)
+                                }
+                                .disabled(isProcessingM3U || !manager.heartbeatReady)
                             }
                             .padding(.vertical, 14)
                             .padding(.horizontal, 16)
