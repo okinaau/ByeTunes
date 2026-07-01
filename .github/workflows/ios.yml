@@ -91,6 +91,16 @@ jobs:
           cp "${{ steps.idevice_files.outputs.header }}" ByeTunes/MusicManager/idevice.h
           ls -la ByeTunes/MusicManager/
 
+      - name: Create bridging header
+        # Per the README, the project expects a Bridging-Header.h that imports
+        # idevice.h, but this file (like the library/header) isn't committed to
+        # the repo, so we have to create it ourselves before building.
+        run: |
+          cat > ByeTunes/MusicManager/Bridging-Header.h << 'EOF'
+          #import "idevice.h"
+          EOF
+          cat ByeTunes/MusicManager/Bridging-Header.h
+
       - name: Detect the Xcode scheme
         id: scheme
         working-directory: ByeTunes
